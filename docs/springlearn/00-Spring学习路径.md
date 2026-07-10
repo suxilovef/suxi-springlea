@@ -127,6 +127,7 @@ Spring Cloud
 ```text
 01-01-Spring-IOC.md
 01-02-Spring-IOC-ConfigurationClassPostProcessor.md
+01-03-Spring-IOC-Bean-Creation.md
 Spring-IOC-Phase0-调试环境搭建.md
 Spring-IOC-Phase1-refresh() 13 步源码逐行精读.md
 ```

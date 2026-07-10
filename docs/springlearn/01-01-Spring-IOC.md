@@ -13,7 +13,7 @@ top_img: false
 ---
 # Spring IOC 知识点（源码深度解析）
 
-> 本文档基于 Spring Boot 3.3.9 + Java 17 + Spring Framework 6.2.11，覆盖 Spring IOC 面试高频知识点和源码核心流程。
+> 本文档基于 Spring Boot 3.3.9 + Java 17 + Spring Framework 6.1.17，覆盖 Spring IOC 面试高频知识点和源码核心流程。
 > 标注 📖 的为面试高频补充知识点；标注 🔬 的为 Spring 源码深度解析。
 
 ---
@@ -142,9 +142,9 @@ AbstractApplicationContext.refresh()  — Spring 容器的"一键启动键"
 │     ├── initPropertySources()    — 初始化属性源（可由子类覆盖）           │
 │     └── 校验必要属性                                                  │
 ├─────────────────────────────────────────────────────────────────────┤
-│  ② obtainFreshBeanFactory()      — 获取全新的 BeanFactory              │
-│     ├── refreshBeanFactory()     — 创建 DefaultListableBeanFactory    │
-│     ├── loadBeanDefinitions()    — 加载所有 BeanDefinition ★         │
+│  ② obtainFreshBeanFactory()      — 获取或刷新 BeanFactory              │
+│     ├── AbstractRefreshableApplicationContext：重建工厂并加载定义       │
+│     ├── GenericApplicationContext：复用构造阶段创建的 BeanFactory        │
 │     └── 返回 ConfigurableListableBeanFactory                         │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ③ prepareBeanFactory()          — 准备 BeanFactory                   │
@@ -163,8 +163,8 @@ AbstractApplicationContext.refresh()  — Spring 容器的"一键启动键"
 │     └── BeanFactoryPostProcessor：修改 BeanFactory 属性                 │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ⑥ registerBeanPostProcessors()  — 注册 BeanPostProcessor             │
-│     └── 从容器中找到所有 BPP → 排序 → 注册到 BeanFactory                │
-│         注意：此处仅注册，还没有创建实例                                  │
+│     └── 从容器中找到所有 BPP → 创建实例 → 排序 → 注册到 BeanFactory       │
+│         注意：此时大多数普通业务 Bean 仍未创建                              │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ⑦ initMessageSource()           — 初始化国际化资源                     │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -189,35 +189,32 @@ AbstractApplicationContext.refresh()  — Spring 容器的"一键启动键"
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**打断点建议**：从 `AbstractApplicationContext.refresh()` 开始，第一步进入 `obtainFreshBeanFactory()`，看 BeanDefinition 如何加载；然后跳到 `finishBeanFactoryInitialization()`，看 Bean 如何创建。
+**打断点建议**：从 `AbstractApplicationContext.refresh()` 开始。XML 容器可跟进 `obtainFreshBeanFactory()` 观察定义加载；注解容器应重点跟进 `invokeBeanFactoryPostProcessors()` 中的配置类解析；最后进入 `finishBeanFactoryInitialization()` 观察 Bean 创建。
 
 ### 2.2 第②步深入：BeanDefinition 加载全链路 🔬
 
-这是"Spring 如何读取你的配置"的核心环节。以注解驱动的 `AnnotationConfigApplicationContext` 为例：
+这是“Spring 如何读取你的配置”的核心环节。不同 `ApplicationContext` 的 BeanDefinition 来源并不相同。以注解驱动的 `AnnotationConfigApplicationContext` 为例：
 
 ```
 AnnotationConfigApplicationContext(AppConfig.class)
   │
-  └── 构造器内调用 refresh()
-        │
-        └── obtainFreshBeanFactory()
-              │
-              └── refreshBeanFactory()
-                    │
-                    ├── ① 创建 DefaultListableBeanFactory
-                    │      → new DefaultListableBeanFactory()
-                    │
-                    ├── ② 创建 AnnotatedBeanDefinitionReader
-                    │      → 注册内置 BeanPostProcessor：
-                    │        · ConfigurationClassPostProcessor   ← ★ 核心！解析 @Configuration
-                    │        · AutowiredAnnotationBeanPostProcessor ← ★ 处理 @Autowired/@Value
-                    │        · CommonAnnotationBeanPostProcessor   ← 处理 @PostConstruct/@PreDestroy
-                    │        · EventListenerMethodProcessor       ← 处理 @EventListener
-                    │
-                    └── ③ 创建 ClassPathBeanDefinitionScanner
-                           → 扫描 @Component/@Service/@Controller/@Repository
-                              │
-                              └── 实际扫描由 ConfigurationClassPostProcessor 完成！★
+  ├── ① this()
+  │     ├── GenericApplicationContext 构造阶段创建 DefaultListableBeanFactory
+  │     ├── 创建 AnnotatedBeanDefinitionReader
+  │     │     └── AnnotationConfigUtils.registerAnnotationConfigProcessors()
+  │     │           ├── ConfigurationClassPostProcessor
+  │     │           ├── AutowiredAnnotationBeanPostProcessor
+  │     │           ├── CommonAnnotationBeanPostProcessor
+  │     │           └── EventListenerMethodProcessor 等基础设施定义
+  │     └── 创建 ClassPathBeanDefinitionScanner
+  │           └── 供 context.scan(...) 编程式扫描使用
+  │
+  ├── ② register(AppConfig.class)
+  │     └── 将 AppConfig 自身注册为 BeanDefinition
+  │
+  └── ③ refresh()
+        └── invokeBeanFactoryPostProcessors()
+              └── ConfigurationClassPostProcessor 开始解析注解配置
 ```
 
 **为什么 ConfigurationClassPostProcessor 是核心？**
@@ -227,45 +224,43 @@ AnnotationConfigApplicationContext(AppConfig.class)
 ```
 ConfigurationClassPostProcessor.postProcessBeanDefinitionRegistry()
   │
-  └── ConfigurationClassParser.processConfigBeanDefinitions()
+  └── ConfigurationClassPostProcessor.processConfigBeanDefinitions()
         │
-        ├── ① 解析 @ComponentScan
-        │     └── ComponentScanAnnotationParser.parse()
-        │           └── ClassPathBeanDefinitionScanner.doScan()
-        │                 ├── findCandidateComponents(basePackage)   // 扫描 .class 文件
-        │                 │     └── 通过 ASM 读取字节码（不触发类加载！）★
-        │                 └── 为每个 @Component 类创建 ScannedGenericBeanDefinition
-        │                       → registry.registerBeanDefinition(beanName, beanDef)
+        ├── ConfigurationClassParser.parse()
+        │     ├── 解析 @ComponentScan
+        │     │     └── ComponentScanAnnotationParser.parse()
+        │     │           └── ClassPathBeanDefinitionScanner.doScan()
+        │     │                 ├── 通过 ASM 读取 .class 元数据
+        │     │                 └── 注册 ScannedGenericBeanDefinition
+        │     ├── 解析 @Import / @ImportResource / @PropertySource
+        │     └── 收集 @Bean 方法并构建 ConfigurationClass 模型
         │
-        ├── ② 解析 @Bean 方法
-        │     └── 将 @Bean 方法封装为 ConfigurationClassBeanDefinition
-        │
-        ├── ③ 解析 @Import
-        │     ├── 普通类 → 注册为 BeanDefinition
-        │     ├── ImportSelector → 调用 selectImports() 返回类名列表
-        │     └── ImportBeanDefinitionRegistrar → 直接注册 BeanDefinition ★
-        │           └── @EnableXxx 系列注解的核心机制
-        │
-        └── ④ 解析 @ImportResource → 加载 XML 配置
+        └── ConfigurationClassBeanDefinitionReader.loadBeanDefinitions()
+              ├── 将 @Bean 方法注册为 ConfigurationClassBeanDefinition
+              ├── 注册 imported 配置类
+              ├── 加载 @ImportResource
+              └── 调用 ImportBeanDefinitionRegistrar
 ```
 
-**面试要点**：`ConfigurationClassPostProcessor` 是在 `invokeBeanFactoryPostProcessors()` 阶段（refresh 第⑤步）才真正执行扫描和解析的，而不是在构造 `AnnotationConfigApplicationContext` 的时候。这是面试中常被问到的时序问题。
+**面试要点**：构造 `AnnotationConfigApplicationContext` 时只是创建 reader/scanner 并注册启动配置类及基础设施 BeanDefinition；`@ComponentScan`、`@Bean`、`@Import` 的真正解析发生在 `invokeBeanFactoryPostProcessors()` 阶段。
 
 ### 2.3 第⑤步深入：BeanFactoryPostProcessor 执行顺序 🔬
 
 ```
 invokeBeanFactoryPostProcessors()
   │
-  ├── 1. 先执行 BeanDefinitionRegistryPostProcessor（按优先级排序）
-  │     ├── PriorityOrdered 的实现
-  │     │     └── 例如自定义的高优先级 BDRPP
-  │     ├── Ordered 的实现
-  │     │     └── ConfigurationClassPostProcessor（实现 PriorityOrdered，最先执行）★
-  │     └── 普通的 BDRPP
+  ├── 1. 执行通过 API 手动传入的 BeanDefinitionRegistryPostProcessor
   │
-  └── 2. 再执行 BeanFactoryPostProcessor（按优先级排序）
-        ├── PriorityOrdered → Ordered → 普通
-        └── 此时 BeanDefinition 已经全部就绪，可以修改 BeanFactory
+  ├── 2. 执行容器中的 BeanDefinitionRegistryPostProcessor
+  │     ├── PriorityOrdered
+  │     │     └── ConfigurationClassPostProcessor 在这里执行 ★
+  │     ├── Ordered
+  │     └── 普通处理器（循环发现本阶段新增的 BDRPP）
+  │
+  ├── 3. 调用上述 BDRPP 的 postProcessBeanFactory()
+  │
+  └── 4. 执行其余 BeanFactoryPostProcessor
+        └── PriorityOrdered → Ordered → 普通
 ```
 
 **面试陷阱**：`@Configuration` 类本身会被 `ConfigurationClassPostProcessor` 再次解析，这意味着如果你的 `@Configuration` 类也实现了 `BeanFactoryPostProcessor`，它的 `postProcessBeanFactory()` 方法不会在第一次扫描阶段自动执行，而是需要等到它自己的 Bean 实例被创建之后。这就是为什么 Spring 官方建议**不要**在 `@Configuration` 类上同时实现 `BeanFactoryPostProcessor`。
@@ -294,9 +289,11 @@ DefaultListableBeanFactory.preInstantiateSingletons()
               │     │     └── initializeBean()        // ③ 初始化 ★
               │     │           ├── invokeAwareMethods()
               │     │           ├── applyBeanPostProcessorsBeforeInitialization()
-              │     │           ├── invokeInitMethods()      // @PostConstruct
+              │     │           │     └── @PostConstruct 在这里由相关 BPP 调用
+              │     │           ├── invokeInitMethods()
+              │     │           │     └── InitializingBean + 自定义 init-method
               │     │           └── applyBeanPostProcessorsAfterInitialization()
-              │     │                 └── ★ AOP 代理在这里生成
+              │     │                 └── 通常在这里生成最终 AOP 代理
               │     └── 放入 singletonObjects 缓存
               └── 返回 Bean 实例
 ```
@@ -415,11 +412,13 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
 
 ### 3.4 循环依赖场景全景图谱
 
+> 以下“可解决”描述指 Spring Framework 在 `allowCircularReferences = true` 时的能力。Spring Boot 3.3.9 默认禁止循环依赖；除非显式设置 `spring.main.allow-circular-references=true`，否则普通字段/Setter 循环依赖也会启动失败。生产代码应优先通过重构消除循环依赖，而不是开启该配置。
+
 ```
-场景一：普通 Bean 循环依赖 → ✅ 可解决（三级缓存）
+场景一：普通单例 Bean 的字段/Setter 循环依赖 → Framework 条件可解决
   A ←→ B  两者都是普通对象，无需代理
 
-场景二：AOP 代理下的循环依赖 → ✅ 可解决（三级缓存 + getEarlyBeanReference）
+场景二：AOP 代理下的字段/Setter 循环依赖 → Framework 条件可解决
   A ←→ B  其中 A 被 @Transactional / @Aspect 代理
 
 场景三：构造器循环依赖 → ❌ 无法解决 ★
@@ -431,7 +430,7 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
   原因：prototype Bean 不会被放入缓存，每次都是新创建
 
 场景五：@Async + 循环依赖 → ❌ 可能无法解决
-  原因：@Async 的代理在 BeanPostProcessor 阶段创建，与 AOP 代理不同
+  原因：早期暴露的对象可能与 @Async 后处理器生成的最终代理不一致
 
 场景六：@Lazy 打破构造器循环依赖 → ✅ 可解决
   class A { public A(@Lazy B b) {} }
@@ -502,7 +501,7 @@ protected <T> T doGetBean(String name, @Nullable Class<T> requiredType,
         // 其他作用域（request, session, application）
         String scopeName = mbd.getScope();
         Scope scope = this.scopes.get(scopeName);
-        Object scopedInstance = scope.get(scopeName, () -> {
+        Object scopedInstance = scope.get(beanName, () -> {
             return createBean(beanName, mbd, args);
         });
         bean = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);
@@ -553,7 +552,7 @@ public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, Str
 // DefaultListableBeanFactory.doResolveDependency()
 public Object doResolveDependency(DependencyDescriptor descriptor, ...) {
 
-    // ① 尝试快捷方式：如果已经缓存的解析结果，直接返回
+    // ① 尝试快捷方式：如果描述符可直接解析，直接返回
     Object shortcut = descriptor.resolveShortcut(this);
     if (shortcut != null) return shortcut;
 
@@ -584,11 +583,11 @@ public Object doResolveDependency(DependencyDescriptor descriptor, ...) {
     }
 
     if (matchingBeans.size() > 1) {
-        // ⑥ 多个候选 Bean — 按 @Primary / @Priority / beanName 决定
+        // ⑥ 多个候选 Bean — 候选已先经过 @Qualifier 等规则过滤，再进行消歧
         autowiredBeanName = determineAutowireCandidate(matchingBeans, descriptor);
-        //     ├── 1. @Primary → 使用标注 @Primary 的 Bean
-        //     ├── 2. @Priority → 使用优先级最高的 Bean
-        //     └── 3. 按方法参数名匹配 → 仍未解决则抛出异常
+        //     ├── @Primary
+        //     ├── @Priority
+        //     └── resolvableDependencies 或依赖名称匹配
         if (autowiredBeanName == null) {
             throw new NoUniqueBeanDefinitionException(type, matchingBeans.keySet());
         }
@@ -603,11 +602,11 @@ public Object doResolveDependency(DependencyDescriptor descriptor, ...) {
 
 | 维度 | @Autowired | @Resource |
 |------|-----------|-----------|
-| **来源** | Spring 注解 | JDK 注解（javax.annotation） |
+| **来源** | Spring 注解 | Jakarta Common Annotations（`jakarta.annotation`） |
 | **注入方式** | 默认按类型（byType） | 默认按名称（byName） |
 | **处理器** | AutowiredAnnotationBeanPostProcessor | CommonAnnotationBeanPostProcessor |
 | **required** | 支持 `required = false` | 不支持，始终注入 |
-| **查找逻辑** | 先 byType，配合 @Qualifier byName | 先 byName，找不到再 byType |
+| **查找逻辑** | 按类型筛选，结合 `@Qualifier`、`@Primary` 等消歧 | 显式名称严格按名称；默认名称在允许回退时可按类型匹配 |
 | **适用位置** | 构造器、字段、setter、方法参数 | 字段、setter |
 
 ```java
@@ -619,7 +618,7 @@ private UserService userService;  // 按类型找 UserService
 @Qualifier("userServiceImpl")     // 按名称精确定位
 private UserService userService;
 
-// @Resource：默认按名称，找不到时回退到按类型
+// @Resource：显式指定 name 时按该名称查找
 @Resource(name = "userServiceImpl")
 private UserService userService;
 ```
@@ -639,9 +638,9 @@ private UserService userService;
 │                                                                         │
 │  1. 实例化 (Instantiation)                                              │
 │     └── createBeanInstance()                                            │
-│          ├── 通过 Supplier 回调（@Bean 方法）                            │
-│          ├── 通过 FactoryMethod（@Bean 方法）                            │
-│          ├── 通过构造器自动装配（默认构造器 > @Autowired 构造器）           │
+│          ├── 通过 Supplier 回调（编程式注册的 instanceSupplier）           │
+│          ├── 通过 FactoryMethod（如 @Bean 方法）                          │
+│          ├── 通过构造器实例化（候选构造器、单构造器或默认构造器）             │
 │          └── InstantiationAwareBeanPostProcessor 可在此返回代理替代实例化   │
 │                                                                         │
 │  2. 属性注入 (Populate)                                                 │
@@ -666,17 +665,18 @@ private UserService userService;
 │                ├── ApplicationEventPublisherAware                       │
 │                ├── MessageSourceAware                                   │
 │                └── ApplicationContextAware ★                            │
+│          └── InitDestroyAnnotationBeanPostProcessor                     │
+│                └── 调用 @PostConstruct                                  │
 │                                                                         │
 │  5. 初始化 (Initialization)                                             │
 │     └── invokeInitMethods()                                             │
-│          ├── @PostConstruct 方法 ★（最先执行）                            │
 │          ├── InitializingBean.afterPropertiesSet()                      │
 │          └── 自定义 init-method（@Bean(initMethod = "init")）              │
 │                                                                         │
 │  6. BeanPostProcessor 后置处理（初始化后）★                               │
 │     └── applyBeanPostProcessorsAfterInitialization()                    │
 │          └── AbstractAutoProxyCreator.wrapIfNecessary()                 │
-│                └── ★ AOP 代理对象在此生成，替换原始 Bean                    │
+│                └── 通常在此生成最终 AOP 代理；循环依赖时可能提前暴露代理       │
 │                                                                         │
 │  ═══════════════ Bean 就绪，可被使用 ═══════════════                      │
 │                                                                         │
@@ -915,8 +915,20 @@ public class AppConfig {
         // ❌ 这样写每次都会创建新的 UserDaoImpl！
         return new UserService(userDao());
     }
+}
+```
 
-    // ✅ 正确写法：通过参数注入
+推荐改为方法参数注入：
+
+```java
+@Configuration(proxyBeanMethods = false)
+public class AppConfig {
+
+    @Bean
+    public UserDao userDao() {
+        return new UserDaoImpl();
+    }
+
     @Bean
     public UserService userService(UserDao userDao) {
         return new UserService(userDao);
@@ -926,7 +938,7 @@ public class AppConfig {
 
 **选择建议**：
 - `proxyBeanMethods = true`（默认）：需要在 `@Bean` 方法间保持单例语义 → 更安全，但多一次 CGLIB 代理生成
-- `proxyBeanMethods = false`：`@Bean` 方法间无调用依赖 → 启动更快，避免 CGLIB 开销（Spring Boot 5.x+ 可能改为默认 false）
+- `proxyBeanMethods = false`：`@Bean` 方法间无直接调用依赖 → 避免配置类 CGLIB 增强开销
 
 ---
 
@@ -983,7 +995,7 @@ public interface InstantiationAwareBeanPostProcessor extends BeanPostProcessor {
 
     // 属性注入阶段：处理 @Autowired、@Value 等 ★
     default PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
-        return null;
+        return pvs;
     }
 }
 ```
@@ -1019,22 +1031,23 @@ public class CustomAnnotationBeanPostProcessor implements BeanPostProcessor {
 
 ```
 容器启动:
-  1. BeanFactoryPostProcessor.postProcessBeanFactory()     ← 修改 BeanDefinition
-      └── BeanDefinitionRegistryPostProcessor.postProcessBeanDefinitionRegistry()
+  1. BeanDefinitionRegistryPostProcessor.postProcessBeanDefinitionRegistry()
+  2. 同一批 BeanDefinitionRegistryPostProcessor.postProcessBeanFactory()
+  3. 其余 BeanFactoryPostProcessor.postProcessBeanFactory()
 
 Bean 生命周期:
-  2. InstantiationAwareBeanPostProcessor.postProcessBeforeInstantiation()  ← 可返回代理
-  3. 实例化（构造器 / FactoryMethod）
-  4. MergedBeanDefinitionPostProcessor.postProcessMergedBeanDefinition()   ← 解析注入元数据
-  5. InstantiationAwareBeanPostProcessor.postProcessAfterInstantiation()   ← 字段值处理
-  6. InstantiationAwareBeanPostProcessor.postProcessProperties()           ← @Autowired 注入
-  7. Aware 接口回调
-  8. BeanPostProcessor.postProcessBeforeInitialization()                   ← 初始化前处理
-  9. @PostConstruct → InitializingBean → init-method
-  10. BeanPostProcessor.postProcessAfterInitialization()                   ← AOP 代理生成 ★
+  4. InstantiationAwareBeanPostProcessor.postProcessBeforeInstantiation()  ← 可返回代理
+  5. 实例化（构造器 / FactoryMethod）
+  6. MergedBeanDefinitionPostProcessor.postProcessMergedBeanDefinition()   ← 解析注入元数据
+  7. InstantiationAwareBeanPostProcessor.postProcessAfterInstantiation()   ← 决定是否继续属性填充
+  8. InstantiationAwareBeanPostProcessor.postProcessProperties()           ← @Autowired 注入
+  9. Aware 接口回调
+  10. BeanPostProcessor.postProcessBeforeInitialization()                  ← 包含 @PostConstruct
+  11. InitializingBean → init-method
+  12. BeanPostProcessor.postProcessAfterInitialization()                   ← 通常生成最终 AOP 代理
 
 容器关闭:
-  11. @PreDestroy → DisposableBean → destroy-method
+  13. @PreDestroy → DisposableBean → destroy-method
 ```
 
 ---
@@ -1283,16 +1296,18 @@ public class AppConfig { ... }
 
 **答题框架**：
 
-1. **三级缓存是核心**：`singletonObjects`（一级）、`earlySingletonObjects`（二级）、`singletonFactories`（三级）
+1. **先说明前提**：Spring Framework 只有在 `allowCircularReferences = true` 时才会尝试解决部分循环依赖；Spring Boot 3.3.9 默认值为 `false`。
 
-2. **流程**：A 和 B 循环依赖
+2. **三级缓存是核心机制**：`singletonObjects`（一级）、`earlySingletonObjects`（二级）、`singletonFactories`（三级）。
+
+3. **流程**：A 和 B 通过字段或 Setter 形成单例循环依赖
    - 创建 A → 实例化 A → 将 A 的 ObjectFactory 放入三级缓存 → 注入 B
    - 创建 B → 实例化 B → 注入 A（从三级缓存拿到 A 的早期引用）→ B 完成
    - A 拿到 B → 继续初始化 → A 完成
 
-3. **为什么是三级不是两级**：AOP 代理问题。如果只有两级，B 中注入的 A 是原始对象，而容器中的 A 是代理对象，产生不一致。三级缓存通过 `getEarlyBeanReference()` 在早期就判断是否需要代理，保证引用一致。
+4. **为什么是三级不是两级**：AOP 代理问题。如果只有两级，B 中注入的 A 可能是原始对象，而容器中的 A 是代理对象，产生不一致。三级缓存通过 `getEarlyBeanReference()` 在早期决定是否暴露代理，保证引用一致。
 
-4. **局限性**：构造器注入的循环依赖无法解决，需要 `@Lazy` 打破。
+5. **局限性**：构造器循环依赖和 prototype 循环依赖无法通过三级缓存解决。可以用 `@Lazy` 在部分场景打破依赖，但生产代码应优先重构，而不是开启循环依赖配置。
 
 ### 11.3 BeanFactory 和 ApplicationContext 的区别？
 
@@ -1386,6 +1401,6 @@ public class AppConfig { ... }
 
 ---
 
-> 本文档编写于 2026-06-24，基于 Spring Boot 3.3.9 + Java 17 + Spring Framework 6.2.11。  
+> 本文档编写于 2026-06-24，基于 Spring Boot 3.3.9 + Java 17 + Spring Framework 6.1.17。
 > 建议结合 Spring 源码调试，加深对 IOC 容器启动、Bean 创建、循环依赖解决机制的理解。  
 > 关联阅读：Spring AOP 知识点（02-01-Spring-AOP.md）、JVM 知识点（JVM.md）。

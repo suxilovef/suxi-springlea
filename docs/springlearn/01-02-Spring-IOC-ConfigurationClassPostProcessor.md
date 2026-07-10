@@ -13,7 +13,7 @@ top_img: false
 ---
 # Spring IOC 专题：ConfigurationClassPostProcessor 深度学习文档
 
-> 本文基于 Spring 源码学习整理。示例版本背景：Spring Boot `3.4.9`、Spring Framework `6.2.11`、Java `17`。
+> 本文基于 Spring 源码学习整理。示例版本背景：Spring Boot `3.3.9`、Spring Framework `6.1.17`、Java `17`。
 >
 > `ConfigurationClassPostProcessor` 是 Spring 注解驱动 IOC 的核心入口。理解它，才能真正理解 `@Configuration`、`@ComponentScan`、`@Bean`、`@Import`、Spring Boot 自动配置、`@EnableXxx` 系列注解如何变成容器中的 `BeanDefinition`。
 
@@ -195,11 +195,13 @@ Spring Boot 启动时：
 DemoApplication.main()
   └── SpringApplication.run(DemoApplication.class, args)
       └── 创建 ApplicationContext
-          └── 注册 DemoApplication 的 BeanDefinition
-              └── 注册 ConfigurationClassPostProcessor 等内置处理器
-                  └── refresh()
-                      └── invokeBeanFactoryPostProcessors()
-                          └── 执行 ConfigurationClassPostProcessor
+          ├── 创建 AnnotatedBeanDefinitionReader
+          │   └── 注册 ConfigurationClassPostProcessor 等基础设施 BeanDefinition
+          ├── 加载 primarySources
+          │   └── 注册 DemoApplication 的 BeanDefinition
+          └── refresh()
+              └── invokeBeanFactoryPostProcessors()
+                  └── 执行 ConfigurationClassPostProcessor
 ```
 
 注意：在 `refresh()` 之前，通常只注册了启动类、少量基础设施类和上下文自身需要的定义。大量业务 Bean 是后续被 `ConfigurationClassPostProcessor` 解析出来的。
@@ -331,18 +333,32 @@ public void processConfigBeanDefinitions(BeanDefinitionRegistry registry) {
 
 ### 5.3 为什么要循环解析
 
-`ConfigurationClassPostProcessor` 不是只解析一轮。原因是解析过程中可能产生新的配置类。
+`ConfigurationClassPostProcessor` 的 `processConfigBeanDefinitions()` 使用外层 `do...while`，直到注册表中不再出现新的、尚未解析的配置类候选。
 
-例如：
+需要区分两种递归机制：
+
+1. `ConfigurationClassParser` 内部递归：直接 `@Import` 的配置类，以及 `@ComponentScan` 扫描出的配置类候选，通常会在当前解析轮次继续调用 `parse()`。
+2. `ConfigurationClassPostProcessor` 外层循环：`ConfigurationClassBeanDefinitionReader` 落地模型或调用 `ImportBeanDefinitionRegistrar` 后，注册表可能新增配置类 BeanDefinition，这些候选需要下一轮解析。
+
+例如 registrar 在模型读取阶段动态注册了另一个配置类：
 
 ```java
 @Configuration
-@Import(OtherConfig.class)
+@Import(ExtraConfigRegistrar.class)
 class AppConfig {
 }
 
+class ExtraConfigRegistrar implements ImportBeanDefinitionRegistrar {
+    @Override
+    public void registerBeanDefinitions(
+            AnnotationMetadata metadata, BeanDefinitionRegistry registry) {
+        registry.registerBeanDefinition(
+            "extraConfig", new AnnotatedGenericBeanDefinition(ExtraConfig.class));
+    }
+}
+
 @Configuration
-class OtherConfig {
+class ExtraConfig {
     @Bean
     UserService userService() {
         return new UserService();
@@ -350,26 +366,7 @@ class OtherConfig {
 }
 ```
 
-第一轮发现 `AppConfig`，解析 `@Import` 后又发现 `OtherConfig`，于是还要继续解析 `OtherConfig`。
-
-再比如：
-
-```java
-@ComponentScan("com.example")
-class DemoApplication {
-}
-```
-
-扫描出来的某个 `@Component` 类上可能还有：
-
-```java
-@Component
-@Import(SomeRegistrar.class)
-class SomeComponent {
-}
-```
-
-所以 Spring 要不断解析新增候选，直到没有新的配置类。
+`ExtraConfig` 的 BeanDefinition 在 reader 调用 registrar 时才加入注册表。外层循环会识别这个新增候选并继续解析，直到没有新的配置类。
 
 ---
 
@@ -774,7 +771,7 @@ public class MyProperties {
 
 `ConfigurationClassParser` 负责把一个候选配置类解析成 `ConfigurationClass` 模型。
 
-它不直接创建 BeanDefinition，而是先构建中间模型：
+它的主要职责是构建中间模型，而不是把 `@Bean`、imported 配置类等结果直接落地为 BeanDefinition：
 
 ```text
 BeanDefinition
@@ -788,7 +785,7 @@ ConfigurationClass
   └── importedBy
 ```
 
-之后再由 `ConfigurationClassBeanDefinitionReader` 把这些模型转换为 BeanDefinition。
+之后再由 `ConfigurationClassBeanDefinitionReader` 把这些模型转换为 BeanDefinition。需要注意，处理 `@ComponentScan` 时，Parser 会委托 `ClassPathBeanDefinitionScanner`，扫描器会在解析过程中直接注册扫描到的 BeanDefinition。
 
 ### 12.2 doProcessConfigurationClass()
 
@@ -915,7 +912,7 @@ userService()
   └── 调用 userDao()
       └── 被 CGLIB 拦截
           ├── 容器中已有 userDao → 返回已有单例
-          └── 容器中没有 userDao → 创建并注册
+          └── 尚无 userDao 实例 → 通过 BeanFactory 创建并放入单例池
 ```
 
 ### 14.3 proxyBeanMethods = false
@@ -937,10 +934,11 @@ Spring Boot 很多自动配置类都使用：
 
 ```java
 @AutoConfiguration
-@Configuration(proxyBeanMethods = false)
+public class CacheAutoConfiguration {
+}
 ```
 
-因为自动配置类通常通过方法参数注入依赖，而不是直接调用另一个 `@Bean` 方法。
+`@AutoConfiguration` 本身已经组合了 `@Configuration(proxyBeanMethods = false)`，不需要重复声明。自动配置类通常通过方法参数注入依赖，而不是直接调用另一个 `@Bean` 方法。
 
 推荐写法：
 
@@ -998,16 +996,20 @@ public class MyPostProcessor implements BeanFactoryPostProcessor {
 
 `BeanFactoryPostProcessor` 工作在普通 Bean 实例化之前。
 
-如果在这个阶段强行获取普通 Bean：
+如果在这个阶段调用 `getBean()` 强行获取普通 Bean：
 
 ```java
 @Component
 public class MyPostProcessor implements BeanFactoryPostProcessor {
 
-    @Autowired
-    private UserService userService;
+    @Override
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+        UserService userService = beanFactory.getBean(UserService.class); // 不推荐
+    }
 }
 ```
+
+此阶段 `AutowiredAnnotationBeanPostProcessor` 尚未完成注册，因此也不能依赖 BFPP 字段上的 `@Autowired` 自动注入普通业务 Bean。
 
 容易导致：
 
@@ -1230,15 +1232,15 @@ public RestTemplate restTemplate() {
 
 ### 18.3 自动配置类使用 proxyBeanMethods = false
 
-如果配置类内部没有直接调用其他 `@Bean` 方法，建议：
+Spring Boot 自动配置类建议直接使用 `@AutoConfiguration`：
 
 ```java
-@Configuration(proxyBeanMethods = false)
+@AutoConfiguration
 public class CacheAutoConfiguration {
 }
 ```
 
-可以减少 CGLIB 增强成本。
+该注解已经包含 `@Configuration(proxyBeanMethods = false)`，可以避免不必要的配置类 CGLIB 增强。普通配置类在没有跨 `@Bean` 方法直接调用时，也可以显式使用 `@Configuration(proxyBeanMethods = false)`。
 
 ### 18.4 不要在 BeanFactoryPostProcessor 中提前 getBean
 
