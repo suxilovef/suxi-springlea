@@ -13,7 +13,7 @@ top_img: false
 ---
 # Spring AOP 知识点
 
-> 本文聚焦 Spring AOP 的通用原理、源码链路与面试高频问题，按 `Spring Boot 3.3.9 + Java 17 + Spring Framework 6.2.11` 的学习上下文整理。SiniCube 项目相关实践已抽离到 `Spring-IOC-Sinicube.md`。  
+> 本文聚焦 Spring AOP 的通用原理、源码链路与面试高频问题，按 `Spring Boot 3.3.9 + Java 17 + Spring Framework 6.2.11` 的学习上下文整理。`。  
 > 说明：版本标注用于学习与调试上下文，实际项目的官方配套关系仍应以 BOM 与依赖树为准。
 
 ---
