@@ -7,7 +7,7 @@ tags:
 categories:
   - Spring
 realm: wujing
-cover: /image/post_cover/spring-aop-min.svg
+cover: /image/post_cover/wujing-spring-aop-advisor.svg
 rank: 76
 top_img: false
 ---

@@ -8,7 +8,7 @@ categories:
   - Spring
 sticky: 100
 realm: wujing
-cover: /image/post_cover/spring-9stage-roadmap-min.svg
+cover: /image/post_cover/wujing-spring-roadmap.svg
 rank: 90
 top_img: false
 ---

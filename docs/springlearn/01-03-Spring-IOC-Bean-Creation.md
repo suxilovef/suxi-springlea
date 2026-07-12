@@ -7,7 +7,7 @@ tags:
 categories:
   - Spring
 realm: wujing
-cover: /image/post_cover/spring-ioc-min.svg
+cover: /image/post_cover/wujing-spring-bean-creation.svg
 rank: 87
 top_img: false
 ---

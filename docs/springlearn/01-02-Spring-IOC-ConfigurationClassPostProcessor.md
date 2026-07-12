@@ -7,7 +7,7 @@ tags:
 categories:
   - Spring
 realm: wujing
-cover: /image/post_cover/spring-beanfactory-postprocessor-min.svg
+cover: /image/post_cover/wujing-spring-ccpp.svg
 rank: 88
 top_img: false
 ---
