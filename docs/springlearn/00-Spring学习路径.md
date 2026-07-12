@@ -128,8 +128,6 @@ Spring Cloud
 01-01-Spring-IOC.md
 01-02-Spring-IOC-ConfigurationClassPostProcessor.md
 01-03-Spring-IOC-Bean-Creation.md
-Spring-IOC-Phase0-调试环境搭建.md
-Spring-IOC-Phase1-refresh() 13 步源码逐行精读.md
 ```
 
 核心目标：
@@ -171,6 +169,12 @@ Spring-IOC-Phase1-refresh() 13 步源码逐行精读.md
 
 ```text
 02-01-Spring-AOP.md
+02-02-Spring-AOP-Proxy.md
+02-03-Spring-AOP-AutoProxyCreator.md
+02-04-Spring-AOP-Advisor-Advice-Pointcut.md
+02-05-Spring-AOP-Invocation-Chain.md
+02-06-Spring-AOP-And-Transaction.md
+02-07-Spring-AOP-Limitations.md
 ```
 
 核心目标：
@@ -209,12 +213,15 @@ Spring-IOC-Phase1-refresh() 13 步源码逐行精读.md
 
 ## 7. 第 4 阶段：Spring Web MVC 与数据访问
 
-建议后续新增文档：
+对应当前文档：
 
 ```text
 03-01-Spring-MVC.md
-03-02-Spring-Transaction.md
-03-03-Spring-Data-MyBatis-JPA.md
+03-02-Spring-MVC-HandlerMapping-HandlerAdapter.md
+03-03-Spring-MVC-ArgumentResolver-ReturnValueHandler.md
+03-04-Spring-MVC-Exception-Interceptor-Validation.md
+03-05-Spring-Transaction.md
+03-06-Spring-Data-MyBatis-JPA.md
 ```
 
 核心目标：
