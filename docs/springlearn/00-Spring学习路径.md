@@ -267,12 +267,12 @@ Spring Cloud
 ```text
 04-01-SpringBoot-启动流程.md
 04-02-SpringBoot-自动配置.md
+04-03-SpringBoot-Starter.md
 ```
 
 建议后续新增文档：
 
 ```text
-04-03-SpringBoot-Starter.md
 04-04-SpringBoot-配置绑定.md
 ```
 

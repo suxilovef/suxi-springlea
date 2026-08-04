@@ -70,7 +70,7 @@ SpringApplication.run()
 
 - `ConfigurationClassPostProcessor` 执行时，大多数普通业务 Bean 还没有实例化。
 - 它操作的是 `BeanDefinition`，不是 Bean 实例。
-- 它执行完成后，`@ComponentScan` 扫描出的 Bean、`@Bean` 方法定义的 Bean、`@Import` 导入的 Bean 才真正进入 BeanDefinition 注册表。
+- 这些 BeanDefinition 会在它的处理过程中分阶段进入注册表：`@ComponentScan` 扫描出的组件在 Parser 调用 Scanner 时直接注册；`@Bean` 方法、导入配置类以及 Registrar 产生的定义主要在 Reader 阶段注册。等它执行完成时，本轮解析得到的 BeanDefinition 已经进入注册表。
 - 后续 `finishBeanFactoryInitialization()` 才会根据这些 BeanDefinition 创建单例 Bean。
 
 ### 1.3 为什么它重要
@@ -238,7 +238,7 @@ public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
 
 ### 4.2 postProcessBeanFactory()
 
-这个方法在 `postProcessBeanDefinitionRegistry()` 之后执行，主要负责增强配置类。
+这个方法在 `postProcessBeanDefinitionRegistry()` 之后执行，主要负责准备配置类的增强类型。这里的“增强”是生成 CGLIB 子类并将其写回 BeanDefinition，通常还没有创建配置类实例或普通业务 Bean。
 
 简化流程：
 
@@ -252,9 +252,25 @@ public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) 
 
 关键点：
 
-- 对 full 模式的 `@Configuration` 类生成 CGLIB 子类。
-- 保证配置类中 `@Bean` 方法互相调用时返回容器中的单例 Bean。
-- 添加 `ImportAwareBeanPostProcessor`，让被 `@Import` 导入的类可以感知导入来源。
+- 对 full 模式的 `@Configuration` 类生成 CGLIB 增强类型，并通过 `BeanDefinition.setBeanClass(enhancedClass)` 替换原始配置类类型。
+- 此时得到的是增强后的 `Class`，不是配置类 Bean 实例；配置类增强实例通常在后续 Bean 创建阶段才生成。
+- 增强类型中的方法拦截逻辑，会在配置类实例创建后保证 `@Bean` 方法互相调用时返回容器管理的 Bean。
+- `new ImportAwareBeanPostProcessor(beanFactory)` 会在这里直接创建一个 Spring 内部基础设施后处理器，并将它加入 BeanFactory；这不代表普通业务 Bean 已经开始实例化。
+- `ImportAwareBeanPostProcessor` 负责让被 `@Import` 导入且实现了 `ImportAware` 的 Bean 感知导入来源。
+
+因此，这个阶段需要区分“增强类型”和“增强实例”：
+
+```text
+原始配置类 Class
+  ↓
+生成 CGLIB 增强 Class
+  ↓
+写回配置类 BeanDefinition
+  ↓
+后续 Bean 创建阶段实例化增强配置类
+  ↓
+调用 @Bean 方法创建业务 Bean
+```
 
 ---
 
@@ -550,13 +566,97 @@ public RestTemplate restTemplate() {
 
 `@Import` 是 Spring 扩展能力最强的入口之一，也是 Spring Boot 自动配置和 `@EnableXxx` 注解的底层基础。
 
-### 9.1 @Import 支持三种类型
+### 9.1 @Import 导入候选的三类角色
 
-| 类型 | 说明 | 例子 |
-|------|------|------|
-| 普通类 | 直接作为配置类或 Bean 注册 | `@Import(UserConfig.class)` |
-| `ImportSelector` | 返回要导入的类名数组 | Spring Boot 自动配置 |
-| `ImportBeanDefinitionRegistrar` | 手动向 registry 注册 BeanDefinition | Feign、AOP、MapperScan 常用 |
+`@Import` 本身是一个注解，它的 `value` 属性统一接收 `Class<?>[]`：
+
+```java
+public @interface Import {
+    Class<?>[] value();
+}
+```
+
+所谓“三类”不是指 `@Import` 有三种类型，而是
+`ConfigurationClassParser` 会根据每个导入候选承担的角色进入不同处理分支：
+
+| 导入候选角色 | Parser 的判断依据 | 处理方式 | 例子 |
+|--------------|-------------------|----------|------|
+| 普通类 | 既不是 Selector，也不是 Registrar | 作为 `ConfigurationClass` 继续解析，必要时注册其自身 BeanDefinition | `@Import(UserConfig.class)` |
+| `ImportSelector` | 实现 `ImportSelector` 接口 | 执行选择器，并递归解析其返回的类名 | `AutoConfigurationImportSelector` |
+| `ImportBeanDefinitionRegistrar` | 实现 `ImportBeanDefinitionRegistrar` 接口 | Parser 先保存 Registrar，Reader 阶段再调用它注册 BeanDefinition | `AspectJAutoProxyRegistrar` |
+
+`DeferredImportSelector` 是 `ImportSelector` 的子接口。概念上它仍属于 Selector，
+但在 `processImports()` 源码中会进入单独的延迟处理分支。
+
+#### 9.1.1 Selector 和 Registrar 为什么在 Parser 阶段实例化
+
+`@Import` 中保存的是候选类，不是已经创建好的策略对象：
+
+```java
+@Import(MyImportSelector.class)
+```
+
+Parser 得到的是 `MyImportSelector.class`。判断它实现了 `ImportSelector` 或
+`ImportBeanDefinitionRegistrar` 后，必须先创建对应实例，才能调用接口定义的行为。
+
+核心过程可以概括为：
+
+```text
+@Import 中的候选类
+  ↓
+SourceClass.isAssignable() 判断候选角色
+  ↓
+candidate.loadClass()
+  ↓
+ParserStrategyUtils.instantiateClass()
+  ↓
+得到 Selector 或 Registrar 策略实例
+```
+
+不同策略对象都是在 Parser 阶段实例化，但核心方法的执行时机不同：
+
+| 导入候选角色 | 实例化时机 | 核心方法执行时机 |
+|--------------|------------|------------------|
+| 普通 `ImportSelector` | Parser 处理 `@Import` 时 | 立即调用 `selectImports()`，继续解析返回的类名 |
+| `DeferredImportSelector` | Parser 处理 `@Import` 时 | 先交给 Deferred Handler 保存，普通配置解析基本完成后再执行 |
+| `ImportBeanDefinitionRegistrar` | Parser 处理 `@Import` 时 | 实例和导入来源元数据先保存到 `ConfigurationClass`，Reader 阶段再调用注册方法 |
+
+普通 Selector 必须立即执行，因为 Parser 需要根据它的返回值决定接下来还要解析哪些类：
+
+```java
+ImportSelector selector = ParserStrategyUtils.instantiateClass(...);
+String[] importClassNames =
+        selector.selectImports(importingClassMetadata);
+```
+
+Registrar 虽然已经实例化，但 Parser 不会立即让它修改 Registry：
+
+```java
+ImportBeanDefinitionRegistrar registrar =
+        ParserStrategyUtils.instantiateClass(...);
+
+configClass.addImportBeanDefinitionRegistrar(
+        registrar, importingClassMetadata);
+```
+
+真正的注册发生在 Reader 阶段：
+
+```java
+registrar.registerBeanDefinitions(
+        importingClassMetadata, registry);
+```
+
+`ParserStrategyUtils.instantiateClass()` 还会按需回调策略对象实现的感知接口：
+
+```text
+BeanClassLoaderAware
+BeanFactoryAware
+EnvironmentAware
+ResourceLoaderAware
+```
+
+需要注意，这里创建的是配置类解析过程使用的策略对象，不是普通业务 Bean。它们通常没有
+对应的普通 BeanDefinition，也不经过常规业务 Bean 的完整创建和 BeanPostProcessor 生命周期。
 
 ### 9.2 导入普通类
 
@@ -592,34 +692,103 @@ Spring Boot 的自动配置机制就是通过 `DeferredImportSelector` 的延迟
 
 ### 9.4 ImportBeanDefinitionRegistrar
 
+下面通过一个自定义 `@EnableMyFeature` 展示 Registrar 的完整使用链路。
+
+首先定义功能 Bean：
+
 ```java
-public class MyRegistrar implements ImportBeanDefinitionRegistrar {
+class MyFeatureService {
+}
+```
+
+定义启用注解，并通过 `@Import` 导入 Registrar：
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Import(MyFeatureRegistrar.class)
+public @interface EnableMyFeature {
+
+    String beanName() default "myFeatureService";
+}
+```
+
+Registrar 读取启用注解的属性，并动态注册 BeanDefinition：
+
+```java
+public class MyFeatureRegistrar implements ImportBeanDefinitionRegistrar {
 
     @Override
     public void registerBeanDefinitions(
             AnnotationMetadata importingClassMetadata,
             BeanDefinitionRegistry registry) {
 
-        RootBeanDefinition bd = new RootBeanDefinition(UserService.class);
-        registry.registerBeanDefinition("userService", bd);
+        Map<String, Object> attributes = importingClassMetadata
+                .getAnnotationAttributes(EnableMyFeature.class.getName());
+        String beanName = (String) Objects.requireNonNull(attributes)
+                .get("beanName");
+
+        RootBeanDefinition beanDefinition =
+                new RootBeanDefinition(MyFeatureService.class);
+        registry.registerBeanDefinition(beanName, beanDefinition);
     }
 }
 ```
 
-特点：
-
-- 可以直接操作 `BeanDefinitionRegistry`
-- 适合动态注册 BeanDefinition
-- 很多 `@EnableXxx` 注解底层都使用它
-
-常见的 `@EnableXxx` 注解：
+在配置类上启用功能：
 
 ```java
-@EnableScheduling
-@EnableAsync
+@Configuration
+@EnableMyFeature(beanName = "customFeatureService")
+class AppConfig {
+}
 ```
 
-这些注解通常会通过 `@Import` 导入 registrar 或 selector，再由 `ConfigurationClassPostProcessor` 解析并触发注册逻辑。
+启动容器后可以取得 Registrar 注册的 Bean：
+
+```java
+try (AnnotationConfigApplicationContext context =
+        new AnnotationConfigApplicationContext(AppConfig.class)) {
+    System.out.println(context.containsBean("customFeatureService")); // true
+    System.out.println(context.getBean(MyFeatureService.class));
+}
+```
+
+完整调用关系：
+
+```text
+AppConfig 上的 @EnableMyFeature
+  ↓
+@Import(MyFeatureRegistrar.class)
+  ↓
+ConfigurationClassParser 识别 Registrar 并保存
+  ↓
+ConfigurationClassBeanDefinitionReader 调用 registerBeanDefinitions()
+  ↓
+customFeatureService 的 BeanDefinition 进入 Registry
+  ↓
+后续 Bean 创建阶段实例化 MyFeatureService
+```
+
+Registrar 的特点：
+
+- 可以直接操作 `BeanDefinitionRegistry`
+- 可以根据导入类的 `AnnotationMetadata` 动态决定 Bean 名称、类型和属性
+- `processImports()` 阶段只实例化并保存 Registrar，真正注册发生在 Reader 阶段
+- 适合框架扩展，不要求被注册的目标类本身是配置类
+
+下面用 Spring 6.1.17 中三个内置的 `@EnableXxx` 注解作为实际案例，分别说明普通配置类、
+`ImportSelector` 和 `ImportBeanDefinitionRegistrar` 三类导入候选的处理方式：
+
+| 启用注解 | 实际 `@Import` 目标 | 导入候选角色 |
+|----------|---------------------|--------------|
+| `@EnableScheduling` | `SchedulingConfiguration.class` | 普通配置类 |
+| `@EnableAsync` | `AsyncConfigurationSelector.class` | `ImportSelector` |
+| `@EnableAspectJAutoProxy` | `AspectJAutoProxyRegistrar.class` | `ImportBeanDefinitionRegistrar` |
+
+因此，`@EnableXxx` 并不固定使用 Registrar。它可以导入普通配置类、Selector 或 Registrar，
+最终由 `ConfigurationClassPostProcessor` 按候选角色进入相应的解析链路。
 
 ### 9.5 DeferredImportSelector 与自动配置
 
@@ -666,14 +835,286 @@ META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
 @ConditionalOnProperty(prefix = "cache", name = "enabled", havingValue = "true")
 ```
 
-### 10.2 条件判断有两个阶段
+需要先区分 Spring Framework 与 Spring Boot 提供的条件能力：
+
+```text
+Spring Framework
+  └── @Conditional：条件装配基础注解
+      └── @Profile：基于 ProfileCondition 的组合条件
+
+Spring Boot
+  ├── @ConditionalOnClass
+  ├── @ConditionalOnMissingBean
+  └── @ConditionalOnProperty
+```
+
+Spring Boot 的 `@ConditionalOnXxx` 注解底层同样组合了 Spring Framework 的
+`@Conditional`，只是提供了开箱即用的 Condition 实现。
+
+### 10.2 常用条件注解的含义与用法
+
+#### 10.2.1 @Conditional：自定义条件的基础入口
+
+`@Conditional` 接收一个或多个 `Condition` 实现类：
+
+```java
+public interface Condition {
+
+    boolean matches(
+            ConditionContext context,
+            AnnotatedTypeMetadata metadata);
+}
+```
+
+例如，根据配置属性决定功能是否生效：
+
+```java
+class FeatureEnabledCondition implements Condition {
+
+    @Override
+    public boolean matches(
+            ConditionContext context,
+            AnnotatedTypeMetadata metadata) {
+
+        return context.getEnvironment()
+                .getProperty("feature.enabled", Boolean.class, false);
+    }
+}
+```
+
+条件可以标在配置类上：
+
+```java
+@Configuration
+@Conditional(FeatureEnabledCondition.class)
+class FeatureConfiguration {
+
+    @Bean
+    FeatureService featureService() {
+        return new FeatureService();
+    }
+}
+```
+
+也可以只控制一个 `@Bean` 方法：
+
+```java
+@Bean
+@Conditional(FeatureEnabledCondition.class)
+FeatureService featureService() {
+    return new FeatureService();
+}
+```
+
+对应配置：
+
+```properties
+feature.enabled=true
+```
+
+只有 `matches()` 返回 `true` 时，相应配置类或 `@Bean` 方法才会继续处理。Condition 是
+由条件评估器创建的策略对象，不是普通业务 Bean，不应依赖常规 `@Autowired` 字段注入。
+
+#### 10.2.2 @Profile：根据运行环境装配
+
+`@Profile` 是 Spring Framework 提供的组合条件，底层使用：
+
+```java
+@Conditional(ProfileCondition.class)
+```
+
+例如，只在开发环境注册数据源：
+
+```java
+@Configuration
+@Profile("dev")
+class DevDataSourceConfiguration {
+
+    @Bean
+    DataSource dataSource() {
+        return createDevDataSource();
+    }
+}
+```
+
+Spring Boot 中可以通过配置文件激活：
+
+```properties
+spring.profiles.active=dev
+```
+
+也可以通过启动参数激活：
+
+```text
+--spring.profiles.active=dev
+```
+
+`@Profile` 支持逻辑表达式：
+
+```java
+@Profile("!prod")       // 非生产环境
+@Profile("dev & mysql") // 同时激活 dev 和 mysql
+@Profile("dev | test")  // 激活 dev 或 test
+```
+
+它既可以标在配置类、组件类上，也可以标在 `@Bean` 方法上。
+
+#### 10.2.3 @ConditionalOnClass：类路径中存在指定类
+
+`@ConditionalOnClass` 由 Spring Boot 提供。当指定类型存在于 classpath 时，条件成立。
+它常用于自动配置判断某个可选依赖是否已经引入：
+
+```java
+@AutoConfiguration
+@ConditionalOnClass(RedisTemplate.class)
+class RedisAutoConfiguration {
+
+    @Bean
+    RedisCacheService redisCacheService() {
+        return new RedisCacheService();
+    }
+}
+```
+
+匹配过程可以理解为：
+
+```text
+classpath 存在 RedisTemplate
+  └── RedisAutoConfiguration 可以继续处理
+
+classpath 不存在 RedisTemplate
+  └── 跳过 RedisAutoConfiguration
+```
+
+如果不希望直接引用可选依赖的 `Class`，也可以使用类名：
+
+```java
+@ConditionalOnClass(
+    name = "org.springframework.data.redis.core.RedisTemplate"
+)
+```
+
+常用属性：
+
+| 属性 | 含义 |
+|------|------|
+| `value` | 使用 `Class<?>` 指定必须存在的类型 |
+| `name` | 使用完整类名字符串指定必须存在的类型 |
+
+指定多个类型时，需要全部存在才匹配。它通常标在自动配置类上；如果 `@Bean` 方法的返回
+类型本身属于可选依赖，更安全的做法是把该方法放入一个单独的条件配置类，避免 JVM 在条件
+判断前解析缺失的返回类型。
+
+#### 10.2.4 @ConditionalOnMissingBean：没有用户 Bean 时提供默认实现
+
+`@ConditionalOnMissingBean` 由 Spring Boot 提供。当 BeanFactory 中没有符合条件的
+BeanDefinition 或可预测 Bean 类型时，条件成立。它主要用于实现“用户配置优先，自动配置兜底”。
+
+```java
+@AutoConfiguration
+class CacheAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean(CacheManager.class)
+    CacheManager cacheManager() {
+        return new DefaultCacheManager();
+    }
+}
+```
+
+如果用户已经提供：
+
+```java
+@Configuration
+class UserCacheConfiguration {
+
+    @Bean
+    CacheManager customCacheManager() {
+        return new CustomCacheManager();
+    }
+}
+```
+
+那么自动配置中的默认 `cacheManager()` 就会被跳过。
+
+当它标在 `@Bean` 方法上并且没有显式指定目标时，Boot 会使用方法返回类型作为默认匹配
+类型，因此下面的写法含义相同：
+
+```java
+@Bean
+@ConditionalOnMissingBean
+CacheManager cacheManager() {
+    return new DefaultCacheManager();
+}
+```
+
+需要注意：
+
+- 它主要检查已经可见的 BeanDefinition 和可预测类型，不要求 Bean 已经实例化。
+- 条件判断只能看到当前阶段已经处理的定义，因此它最适合用在自动配置中。
+- 除了类型，还可以根据 Bean 名称、注解、泛型容器和父子容器搜索策略进行匹配。
+
+#### 10.2.5 @ConditionalOnProperty：根据配置属性开关功能
+
+`@ConditionalOnProperty` 由 Spring Boot 提供，根据 `Environment` 中的属性值决定条件
+是否成立，常用于功能开关：
+
+```java
+@Configuration
+@ConditionalOnProperty(
+    prefix = "cache",
+    name = "enabled",
+    havingValue = "true",
+    matchIfMissing = false
+)
+class CacheConfiguration {
+
+    @Bean
+    CacheService cacheService() {
+        return new CacheService();
+    }
+}
+```
+
+`prefix` 和 `name` 会组合成完整属性名：
+
+```text
+cache.enabled
+```
+
+配置为下面的值时条件成立：
+
+```properties
+cache.enabled=true
+```
+
+YAML 写法：
+
+```yaml
+cache:
+  enabled: true
+```
+
+关键属性：
+
+| 属性 | 含义 |
+|------|------|
+| `prefix` | 属性前缀，例如 `cache` |
+| `name` / `value` | 属性名称，`value` 是 `name` 的别名 |
+| `havingValue` | 属性必须匹配的期望值 |
+| `matchIfMissing` | 属性不存在时是否认为匹配，默认 `false` |
+
+当 `havingValue` 保持默认空字符串时，只要属性存在且值不是 `false`，通常就会匹配。指定
+多个 `name` 时，所有属性都需要满足条件。
+
+### 10.3 条件判断有两个阶段
 
 Spring 条件判断分两类：
 
 | 阶段 | 枚举 | 说明 |
 |------|------|------|
 | 配置类解析阶段 | `ConfigurationPhase.PARSE_CONFIGURATION` | 决定配置类是否需要继续解析 |
-| Bean 注册阶段 | `ConfigurationPhase.REGISTER_BEAN` | 决定 `@Bean` 是否注册 |
+| Bean 注册阶段 | `ConfigurationPhase.REGISTER_BEAN` | 在 Reader 落地模型时，决定配置类、导入配置类及其 `@Bean` 方法对应的 BeanDefinition 是否注册 |
 
 示例：
 
@@ -695,7 +1136,7 @@ public class RedisConfig {
 - 如果 classpath 没有 `RedisTemplate`，整个 `RedisConfig` 都跳过。
 - 如果已经有 `CacheManager` BeanDefinition，`cacheManager()` 这个 `@Bean` 跳过。
 
-### 10.3 为什么自动配置要后解析
+### 10.4 为什么自动配置要后解析
 
 以 `@ConditionalOnMissingBean` 为例：
 
@@ -786,6 +1227,78 @@ ConfigurationClass
 ```
 
 之后再由 `ConfigurationClassBeanDefinitionReader` 把这些模型转换为 BeanDefinition。需要注意，处理 `@ComponentScan` 时，Parser 会委托 `ClassPathBeanDefinitionScanner`，扫描器会在解析过程中直接注册扫描到的 BeanDefinition。
+
+#### 12.1.1 BeanDefinition 到底由谁注册
+
+不能根据上面的特殊处理得出“绝大多数 BeanDefinition 都由
+`ClassPathBeanDefinitionScanner` 注册”的统一结论。BeanDefinition 的注册者取决于定义来源：
+
+| BeanDefinition 来源 | 主要注册者 |
+|-----------------------|------------|
+| `@Component`、`@Service`、`@Repository`、`@Controller` | `ClassPathBeanDefinitionScanner` |
+| 通过组件扫描发现的 `@Configuration` 类自身 | `ClassPathBeanDefinitionScanner` |
+| 配置类中的 `@Bean` 方法 | `ConfigurationClassBeanDefinitionReader` |
+| `@Import` 导入的普通配置类自身 | `ConfigurationClassBeanDefinitionReader` |
+| `ImportBeanDefinitionRegistrar` 产生的定义 | Registrar 自己；Reader 负责调用 Registrar |
+| Spring Boot 自动配置类中的 `@Bean` 方法 | `ConfigurationClassBeanDefinitionReader` |
+| 启动类以及通过 `context.register()` 注册的类 | `AnnotatedBeanDefinitionReader` |
+| `@ImportResource` 导入的 XML 等资源 | Reader 委托对应的 `BeanDefinitionReader` |
+
+例如：
+
+```java
+@Configuration
+@ComponentScan("com.example.order")
+class AppConfig {
+
+    @Bean
+    RestTemplate restTemplate() {
+        return new RestTemplate();
+    }
+}
+```
+
+假设 `com.example.order` 中包含 `OrderService` 和 `OrderRepository`，注册关系是：
+
+```text
+AppConfig 自身
+  └── 作为启动类或 context.register() 参数时，
+      由 AnnotatedBeanDefinitionReader 注册
+
+@ComponentScan 扫描到的 OrderService、OrderRepository
+  └── 由 ClassPathBeanDefinitionScanner 在扫描过程中直接注册
+
+AppConfig#restTemplate()
+  └── Parser 先记录为 BeanMethod，
+      再由 ConfigurationClassBeanDefinitionReader 注册
+```
+
+如果某个 `@Configuration` 类本身也是通过组件扫描发现的，还要继续区分“配置类自身”和
+“配置类产生的 Bean”：
+
+```java
+@Configuration
+class CacheConfig {
+
+    @Bean
+    CacheManager cacheManager() {
+        return new ConcurrentMapCacheManager();
+    }
+}
+```
+
+```text
+CacheConfig 自身的 BeanDefinition
+  └── ClassPathBeanDefinitionScanner 注册
+
+cacheManager() 对应的 BeanDefinition
+  └── ConfigurationClassBeanDefinitionReader 注册
+```
+
+因此，只统计 `@Service`、`@Repository`、`@Controller` 等业务组件时，Scanner 注册的数量
+通常很多；但统计整个 Spring Boot 容器时，还包含自动配置、`@Bean`、Registrar 和基础设施
+定义，不能笼统认为 Scanner 一定占绝大多数。扫描结果如何继续影响 Parser 当前轮次，见
+18.7 节。
 
 ### 12.2 doProcessConfigurationClass()
 
@@ -1499,9 +2012,13 @@ META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
   ↓
 再处理 DeferredImportSelector，补充自动配置模型
   ↓
-Reader 按配置模型注册 BeanDefinition
+Reader 按 ConfigurationClass 顺序遍历模型
   ↓
-@ConditionalOnMissingBean 等注册阶段条件检查当前 BeanDefinitionRegistry
+检查当前配置类或 @Bean 方法的 REGISTER_BEAN 条件
+  ↓
+条件匹配后注册 BeanDefinition
+  ↓
+后续条件可以看到此前已经累积到 BeanDefinitionRegistry 的定义
 ```
 
 自动配置能够“后退”，依赖以下机制共同作用：
@@ -1850,7 +2367,7 @@ beanName 回写非常关键，因为非静态 `@Bean` 方法的 BeanDefinition �
 例如：
 
 ```java
-@Bean(name = {userService, userServiceAlias})
+@Bean(name = {"userService", "userServiceAlias"})
 public UserService createUserService() {
     return new UserService();
 }
@@ -2001,10 +2518,10 @@ Reader 会处理 `@Bean` 方法和元注解上的通用属性：
 
 ```java
 @Bean(
-    name = client,
+    name = "client",
     autowireCandidate = false,
-    initMethod = start,
-    destroyMethod = close
+    initMethod = "start",
+    destroyMethod = "close"
 )
 ```
 
@@ -2024,7 +2541,7 @@ Reader 会读取 `@Scope`：
 
 ```java
 @Bean
-@Scope(value = request, proxyMode = ScopedProxyMode.TARGET_CLASS)
+@Scope(value = "request", proxyMode = ScopedProxyMode.TARGET_CLASS)
 public RequestContext requestContext() {
     return new RequestContext();
 }
@@ -2715,9 +3232,9 @@ ConditionEvaluationReport.outcomes
 ```
 
 ---
-## 二十二、专题七：七组可运行源码实验
+## 二十二、专题七：七组源码实验
 
-这七组实验分别对应前面六个源码专题，并在最后用一个 Boot 自动配置实验串起完整链路。
+这七组实验分别对应前面六个源码专题，并在最后用一个 Boot 自动配置实验串起完整链路。文中的代码聚焦核心机制；实际运行时，需要补充对应的 `package`、`import`，以及 `UserDao`、`UserService` 等仅承担数据验证作用的简单辅助类。
 
 建议把示例放在：
 
