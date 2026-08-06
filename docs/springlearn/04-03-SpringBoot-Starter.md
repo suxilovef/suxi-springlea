@@ -150,7 +150,7 @@ spring-webmvc
 
 而 `DispatcherServlet`、`RequestMappingHandlerMapping`、`HttpMessageConverter` 等 Bean 的默认创建，主要由 `spring-boot-autoconfigure` 中的 Web 自动配置完成。
 
-### 3.2 为什么 Starter 不等于自动配置
+### 3.2 Starter 与自动配置如何配合
 
 如果只把 Spring MVC 和 Tomcat 放进 classpath，但没有启用 Spring Boot 自动配置：
 
@@ -173,11 +173,9 @@ Starter 改变 classpath
   -> 自动配置决定最终注册哪些 Bean
 ```
 
-### 3.3 一个容易忽略的事实
-
 自动配置不是由 Starter 直接“调用”的。
 
-Starter 只是通过依赖关系把自动配置 jar 放入 classpath。应用中的 `@EnableAutoConfiguration` 才是自动配置候选的统一导入入口。
+Starter 只是通过依赖关系把自动配置 jar 放入 classpath。在典型 Spring Boot 应用中，`@EnableAutoConfiguration` 才负责统一导入自动配置候选；测试或框架内部也可以通过 `@ImportAutoConfiguration` 定向导入自动配置。
 
 ---
 
@@ -287,8 +285,12 @@ greeting-spring-boot/
 │   │   └── GreetingProperties.java
 │   └── src/main/resources/META-INF/spring/
 │       └── org.springframework.boot.autoconfigure.AutoConfiguration.imports
-└── greeting-spring-boot-starter/
-    └── pom.xml
+├── greeting-spring-boot-starter/
+│   └── pom.xml
+└── greeting-spring-boot-starter-tests/
+    ├── pom.xml
+    └── src/test/java/com/example/greeting/tests/
+        └── StarterIntegrationTests.java
 ```
 
 ### 5.3 父工程只负责聚合
@@ -315,6 +317,7 @@ greeting-spring-boot/
         <module>greeting-client</module>
         <module>greeting-spring-boot-autoconfigure</module>
         <module>greeting-spring-boot-starter</module>
+        <module>greeting-spring-boot-starter-tests</module>
     </modules>
 
     <properties>
@@ -440,13 +443,7 @@ autoconfigure 可以编译
 但 greeting-client 不会继续作为它的传递依赖提供给下游
 ```
 
-真正的 Starter 会显式依赖 `greeting-client`，从而决定默认组合。
-
-### 7.3 optional 的影响范围
-
-Maven 的 `optional=true` 不是运行时开关，也不是 Spring 条件。
-
-它主要影响依赖传递：
+真正的 Starter 会显式依赖 `greeting-client`，从而决定默认组合。Maven 的 `optional=true` 不是运行时开关，也不是 Spring 条件，它只控制该依赖是否继续传递给下游。
 
 ```text
 A 依赖 autoconfigure
@@ -632,9 +629,7 @@ com.example.greeting.autoconfigure.GreetingMetricsAutoConfiguration
 
 ### 11.2 为什么 Starter 要再次依赖 greeting-client
 
-因为 AutoConfigure 模块把它声明为可选依赖，不会自动传递给下游。
-
-Starter 显式声明后：
+AutoConfigure 模块中的可选依赖不会自动传递给使用者，因此 Starter 必须显式补回 `greeting-client`：
 
 ```text
 引入 Starter
@@ -644,12 +639,7 @@ Starter 显式声明后：
   -> 默认 GreetingClient 可以被创建
 ```
 
-如果 Starter 忘记声明 `greeting-client`：
-
-- AutoConfiguration 仍可能被发现。
-- `@ConditionalOnClass` 不成立。
-- 默认 Bean 不会创建。
-- 使用者会产生“引入 Starter 但没有生效”的困惑。
+如果漏掉该依赖，AutoConfiguration 仍可能被发现，但 `@ConditionalOnClass` 不成立，默认 Bean 不会创建。
 
 ### 11.3 是否需要依赖 spring-boot-starter
 
@@ -854,7 +844,34 @@ spring-autoconfigure-metadata.properties
   -> 提供部分条件和排序元数据，辅助提前过滤
 ```
 
-### 14.4 验证元数据是否打包
+### 14.4 显式 annotationProcessorPaths 的特殊情况
+
+在 Java 17 和 Maven 默认配置下，把处理器声明为依赖即可参与注解处理。
+
+但如果项目显式配置了 `maven-compiler-plugin` 的 `annotationProcessorPaths`，编译器只会从列出的路径中查找处理器。此时仅添加依赖还不够，必须把处理器加入路径。
+
+当前仓库的 `pom.xml` 已经将该路径限定为 Lombok，因此需要扩展为：
+
+```xml
+<annotationProcessorPaths>
+    <path>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+    </path>
+    <path>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-configuration-processor</artifactId>
+    </path>
+    <path>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-autoconfigure-processor</artifactId>
+    </path>
+</annotationProcessorPaths>
+```
+
+生成主代码元数据时至少要修正 `default-compile`；如果测试源码也使用 Lombok 或其他注解处理器，再同步检查 `default-testCompile`。修改时必须保留项目原有的处理器。
+
+### 14.5 验证元数据是否打包
 
 构建后执行：
 
@@ -951,27 +968,40 @@ GreetingClient customGreetingClient() {
 
 它比启动完整 Web 应用更适合验证自动配置条件。
 
-### 16.2 验证默认 Bean
+### 16.2 完整 AutoConfigure 模块测试
+
+下面的代码是一个完整测试类，同时验证默认 Bean、用户退让、缺类条件和 imports 发现机制：
 
 ```java
+package com.example.greeting.autoconfigure;
+
 import com.example.greeting.client.GreetingClient;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Configuration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class GreetingAutoConfigurationTests {
 
-    private final ApplicationContextRunner contextRunner =
+    private final ApplicationContextRunner directRunner =
             new ApplicationContextRunner()
                     .withConfiguration(
                             AutoConfigurations.of(GreetingAutoConfiguration.class)
                     );
 
+    private final ApplicationContextRunner importsRunner =
+            new ApplicationContextRunner()
+                    .withUserConfiguration(
+                            EnableAutoConfigurationTestConfiguration.class
+                    );
+
     @Test
     void createsDefaultGreetingClient() {
-        contextRunner
+        directRunner
                 .withPropertyValues(
                         "acme.greeting.endpoint=https://test.example.com"
                 )
@@ -981,53 +1011,135 @@ class GreetingAutoConfigurationTests {
                             .isEqualTo("https://test.example.com");
                 });
     }
+
+    @Test
+    void backsOffWhenUserProvidesGreetingClient() {
+        GreetingClient customClient =
+                new GreetingClient("https://custom.example.com");
+
+        directRunner
+                .withBean(GreetingClient.class, () -> customClient)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(GreetingClient.class);
+                    assertThat(context.getBean(GreetingClient.class))
+                            .isSameAs(customClient);
+                });
+    }
+
+    @Test
+    void doesNotConfigureWhenGreetingClientIsMissing() {
+        directRunner
+                .withClassLoader(new FilteredClassLoader(GreetingClient.class))
+                .run(context ->
+                        assertThat(context)
+                                .doesNotHaveBean(GreetingClient.class)
+                );
+    }
+
+    @Test
+    void discoversAutoConfigurationFromImports() {
+        importsRunner
+                .withPropertyValues(
+                        "acme.greeting.endpoint=https://imports.example.com"
+                )
+                .run(context -> {
+                    assertThat(context).hasSingleBean(GreetingClient.class);
+                    assertThat(context.getBean(GreetingClient.class).getEndpoint())
+                            .isEqualTo("https://imports.example.com");
+                });
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableAutoConfiguration
+    static class EnableAutoConfigurationTestConfiguration {
+    }
 }
 ```
 
-### 16.3 验证退让
+两个 Runner 的测试目标不同：
+
+| Runner | 验证内容 |
+|---|---|
+| `directRunner` | 自动配置类自身的条件和 Bean 注册逻辑 |
+| `importsRunner` | `@EnableAutoConfiguration` 能否从 `AutoConfiguration.imports` 发现配置类 |
+
+### 16.3 增加独立 consumer 集成测试
+
+AutoConfigure 模块测试仍然不能证明 Starter POM 正确，因为测试模块直接依赖了 AutoConfigure 和 client。
+
+建议增加一个只依赖 Starter 的测试模块：
+
+```xml
+<project>
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>greeting-spring-boot</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>greeting-spring-boot-starter-tests</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>greeting-spring-boot-starter</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
+```
+
+该模块不直接依赖 `greeting-client` 或 AutoConfigure 模块。测试代码：
 
 ```java
-@Test
-void backsOffWhenUserProvidesGreetingClient() {
-    GreetingClient customClient =
-            new GreetingClient("https://custom.example.com");
+package com.example.greeting.tests;
 
-    contextRunner
-            .withBean(GreetingClient.class, () -> customClient)
-            .run(context -> {
-                assertThat(context).hasSingleBean(GreetingClient.class);
-                assertThat(context.getBean(GreetingClient.class))
-                        .isSameAs(customClient);
-            });
+import com.example.greeting.client.GreetingClient;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.SpringBootConfiguration;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@SpringBootTest(
+        classes = StarterIntegrationTests.TestApplication.class,
+        properties = "acme.greeting.endpoint=https://consumer.example.com"
+)
+class StarterIntegrationTests {
+
+    @Autowired
+    private GreetingClient greetingClient;
+
+    @Test
+    void starterProvidesClientAndAutoConfiguration() {
+        assertThat(greetingClient.getEndpoint())
+                .isEqualTo("https://consumer.example.com");
+    }
+
+    @SpringBootConfiguration
+    @EnableAutoConfiguration
+    static class TestApplication {
+    }
 }
 ```
 
-### 16.4 验证类不存在
+这个测试同时验证：
 
-```java
-import org.springframework.boot.test.context.FilteredClassLoader;
-
-@Test
-void doesNotConfigureWhenGreetingClientIsMissing() {
-    contextRunner
-            .withClassLoader(new FilteredClassLoader(GreetingClient.class))
-            .run(context ->
-                    assertThat(context).doesNotHaveBean(GreetingClient.class)
-            );
-}
-```
-
-### 16.5 单元测试不能替代最终集成测试
-
-`AutoConfigurations.of(GreetingAutoConfiguration.class)` 是显式加载自动配置类，它不会验证 `AutoConfiguration.imports` 文件是否写对。
-
-还应增加至少一个真实使用方测试，确认：
-
-- 只引入 Starter 依赖。
-- 不手工 `@Import` 自动配置类。
-- `@EnableAutoConfiguration` 能发现 imports 文件。
-- 配置属性能够绑定。
-- 默认 Bean 和退让行为都符合预期。
+- Starter POM 确实传递了 `greeting-client`。
+- Starter POM 确实传递了 AutoConfigure 模块。
+- `AutoConfiguration.imports` 已正确打包。
+- 配置属性可以绑定。
+- 默认 `GreetingClient` 可以创建。
 
 ---
 
@@ -1076,18 +1188,7 @@ void doesNotConfigureWhenGreetingClientIsMissing() {
 
 应按能力拆分 Starter，或者把扩展集成做成可选模块。
 
-### 17.4 AutoConfigure 模块把类库设为 optional，但 Starter 忘记补回
-
-表现：
-
-```text
-自动配置类在 jar 中
-但 @ConditionalOnClass 永远不成立
-```
-
-使用 `mvn dependency:tree` 确认类库是否进入最终应用。
-
-### 17.5 只测试自动配置类，不测试发布物
+### 17.4 只测试自动配置类，不测试发布物
 
 测试源码中的自动配置类可以通过，不代表最终 jar 正确。
 
@@ -1101,7 +1202,7 @@ void doesNotConfigureWhenGreetingClientIsMissing() {
 
 因此应检查 jar 内容并建立使用方集成测试。
 
-### 17.6 自动配置覆盖用户 Bean
+### 17.5 自动配置覆盖用户 Bean
 
 检查：
 
@@ -1111,7 +1212,7 @@ void doesNotConfigureWhenGreetingClientIsMissing() {
 - 自动配置之间的顺序是否正确。
 - 是否错误使用 `@Primary` 代替退让。
 
-### 17.7 把 Starter 打成可执行 fat jar
+### 17.6 把 Starter 打成可执行 fat jar
 
 Starter 是给其他项目依赖的类库，不是独立启动应用。
 
@@ -1201,9 +1302,10 @@ jar tf target/your-autoconfigure.jar
 3. 删除 Starter 中的 client 依赖，观察 `@ConditionalOnClass` 不匹配。
 4. 用户显式声明同类型 Bean，确认默认配置退让。
 5. 故意写错 imports 文件路径，观察自动配置无法发现。
-6. 使用 `ApplicationContextRunner` 验证默认配置和退让。
-7. 使用 `mvn dependency:tree` 画出 Starter 依赖树。
-8. 解压 AutoConfigure jar，检查 imports 和配置元数据。
+6. 使用 `ApplicationContextRunner` 验证默认配置、退让和 imports 发现。
+7. 创建只依赖 Starter 的 consumer 测试模块。
+8. 使用 `mvn dependency:tree` 画出 Starter 依赖树。
+9. 解压 AutoConfigure jar，检查 imports 和配置元数据。
 
 ### 19.2 Starter 的原理是什么？
 
@@ -1235,12 +1337,12 @@ Starter 通过 dependencies 真正把一组依赖加入项目。
 Starter 再显式决定默认要聚合哪些真实依赖。
 ```
 
-### 19.6 为什么不能只靠 ApplicationContextRunner 测试？
+### 19.6 为什么不能只测试显式加载的 AutoConfiguration？
 
 ```text
-显式传入 AutoConfiguration 类只能验证配置逻辑，
-不能证明 AutoConfiguration.imports、Starter POM 和最终 jar 打包正确，
-所以还需要真实使用方集成测试。
+通过 AutoConfigurations.of(...) 显式传入配置类，只能验证配置逻辑；
+还需要通过 @EnableAutoConfiguration 验证 imports 发现，并用独立 consumer 模块
+验证 Starter POM 的传递依赖和最终发布物。
 ```
 
 ---

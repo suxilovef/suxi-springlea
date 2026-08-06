@@ -19,9 +19,24 @@ top_img: false
 
 ---
 
-## 一、先建立完整认知
+## 阅读路径：先抓主线，再查专题
 
-### 1.1 Bean 创建到底在解决什么问题
+本文内容多，是因为 Bean 创建不是单一方法调用，而是同时牵涉主创建链路、实例化分支、依赖解析、生命周期增强、循环依赖、FactoryBean、Scope 和销毁流程。
+
+不要按“从头背到尾”的方式读。建议分三遍：
+
+```text
+第一遍：只读第一部分，先串起 getBean → doGetBean → createBean → doCreateBean
+第二遍：读第二部分，补齐实例化、依赖注入、初始化、AOP 和三级缓存
+第三遍：按问题查第三、第四部分，FactoryBean、Scope、销毁、调试和面试题都属于专题
+```
+
+如果只想先掌握 Bean 创建主线，读到第八章即可。后面的内容不是新的主线，而是主线上的分支、边界和验证方法。
+
+## 第一部分：主线必读
+### 一、先建立完整认知
+
+#### 1.1 Bean 创建到底在解决什么问题
 
 配置类解析完成后，容器中保存的是 `BeanDefinition`，不是业务对象。
 
@@ -56,11 +71,11 @@ Bean 创建流程需要同时解决：
 - 创建失败后如何清理缓存和依赖关系
 - 容器关闭时如何执行销毁回调
 
-### 1.2 一句话主线
+#### 1.2 一句话主线
 
 > `doGetBean()` 决定“从哪里得到 Bean”，`createBean()` 决定“是否允许后处理器提前替换 Bean”，`doCreateBean()` 完成“实例化、注入、初始化和销毁注册”。
 
-### 1.3 必须背下来的调用链
+#### 1.3 必须背下来的调用链
 
 ```text
 AbstractApplicationContext.refresh()
@@ -84,7 +99,7 @@ AbstractApplicationContext.refresh()
                               └── registerDisposableBeanIfNecessary()
 ```
 
-### 1.4 三组容易混淆的概念
+#### 1.4 三组容易混淆的概念
 
 | 概念 | 含义 |
 |------|------|
@@ -100,9 +115,9 @@ BeanDefinition != Bean
 
 ---
 
-## 二、使用最小案例贯穿全文
+### 二、使用最小案例贯穿全文
 
-### 2.1 示例代码
+#### 2.1 示例代码
 
 ```java
 @Service
@@ -160,7 +175,7 @@ BeanDefinition：描述如何创建 OrderService
 最终对象 exposedObject：初始化完成后放入单例池的对象
 ```
 
-### 2.2 推荐的调试配置
+#### 2.2 推荐的调试配置
 
 ```yaml
 spring:
@@ -172,9 +187,9 @@ Spring Boot `3.3.9` 默认禁止循环依赖。只有研究循环依赖实验时
 
 ---
 
-## 三、Bean 创建从哪里开始
+### 三、Bean 创建从哪里开始
 
-### 3.1 refresh() 中的入口
+#### 3.1 refresh() 中的入口
 
 普通非懒加载单例主要在下面的阶段创建：
 
@@ -195,9 +210,9 @@ AbstractApplicationContext.refresh()
 - `BeanFactoryPostProcessor` 阶段错误地提前调用 `getBean()`
 - 非懒 Bean 依赖某个懒 Bean
 - `@DependsOn` 要求先创建指定 Bean
-- 获取 `FactoryBean` 的产品对象
+- 调用 `getBean("factoryBeanName")` 获取 `FactoryBean.getObject()` 返回的对象
 
-### 3.2 preInstantiateSingletons() 做了什么
+#### 3.2 preInstantiateSingletons() 做了什么
 
 Spring Framework `6.1.17` 中，`DefaultListableBeanFactory.preInstantiateSingletons()` 的核心逻辑是：
 
@@ -240,7 +255,7 @@ public void preInstantiateSingletons() throws BeansException {
 - `SmartFactoryBean.isEagerInit()` 返回 true 时才提前创建产品对象
 - `SmartInitializingSingleton` 在所有普通单例创建完成后执行，适合做全局单例就绪后的工作
 
-### 3.3 lazy Bean 是否永远不创建
+#### 3.3 lazy Bean 是否永远不创建
 
 不是。
 
@@ -262,9 +277,9 @@ public class ReportService {
 
 ---
 
-## 四、getBean() 与 doGetBean() 主流程
+### 四、getBean() 与 doGetBean() 主流程
 
-### 4.1 getBean() 只是入口
+#### 4.1 getBean() 只是入口
 
 常见重载最终都会进入：
 
@@ -288,24 +303,58 @@ protected <T> T doGetBean(
 - singleton、prototype、自定义 Scope
 - 类型适配
 
-### 4.2 第一步：转换 Bean 名称
+#### 4.2 第一步：转换 Bean 名称
 
 ```java
 String beanName = transformedBeanName(name);
 ```
 
+这一步只做一件核心事情：把外部传入的查询名，转换成容器内部真正用于查找 BeanDefinition 和缓存的 beanName。
+
 它会处理：
 
-- 别名转换
-- `&` 前缀去除
-- FactoryBean 名称规范化
+- 别名转换为最终规范名
+- 去掉 `&` 前缀
+- 得到 FactoryBean 在容器中的真实 beanName
 
-```text
-getBean("userService")  → 获取普通 Bean 或 FactoryBean 产品
-getBean("&myFactory")   → 获取 FactoryBean 工厂本身
+注意：`&` 不是 BeanName 的一部分，而是一次 `getBean()` 调用的查询语义。
+
+假设容器中注册了一个 FactoryBean：
+
+```java
+@Component("myFactory")
+class MyFactoryBean implements FactoryBean<Car> {
+}
 ```
 
-### 4.3 第二步：优先查询单例缓存
+调用 `getBean("myFactory")` 时：
+
+```text
+原始 name = "myFactory"
+transformedBeanName(name) = "myFactory"
+```
+
+Spring 用 `"myFactory"` 查到的是 `MyFactoryBean` 工厂对象。但因为原始 `name` 不带 `&`，Spring 会继续调用 `FactoryBean.getObject()`，最终返回工厂生产的 `Car`。
+
+调用 `getBean("&myFactory")` 时：
+
+```text
+原始 name = "&myFactory"
+transformedBeanName(name) = "myFactory"
+```
+
+Spring 内部仍然用 `"myFactory"` 查找，因为容器中没有名为 `"&myFactory"` 的 BeanDefinition。区别在于，原始 `name` 带了 `&`，表示调用方明确要 FactoryBean 工厂本身，所以最终返回 `MyFactoryBean`。
+
+```text
+getBean("userService")  → 普通 Bean，返回 UserService
+getBean("&userService") → 普通 Bean 带 &，抛 BeanIsNotAFactoryException
+getBean("myFactory")    → FactoryBean，返回 FactoryBean.getObject() 产品
+getBean("&myFactory")   → FactoryBean 带 &，返回 FactoryBean 工厂本身
+```
+
+所以 `transformedBeanName(name)` 解决的是“内部按哪个名字查”，而后面的 `getObjectForBeanInstance()` 才根据原始 `name` 是否带 `&` 决定“返回工厂本身还是工厂产品”。
+
+#### 4.3 第二步：优先查询单例缓存
 
 ```java
 Object sharedInstance = getSingleton(beanName);
@@ -318,9 +367,25 @@ if (sharedInstance != null && args == null) {
 
 为什么缓存命中后还要调用 `getObjectForBeanInstance()`？
 
-因为缓存中的对象可能是 `FactoryBean`，用户真正想要的是它的 `getObject()` 产品，而不是工厂本身。
+因为 `getSingleton(beanName)` 命中后，只能说明 Spring 找到了内部缓存里的对象，还不能直接说明这个对象就是调用方最终想要的对象。
 
-### 4.4 第三步：prototype 循环依赖检查
+这里传入的是转换后的 `beanName`，所以缓存中保存的可能是：
+
+```text
+singletonObjects["userService"] = UserService
+singletonObjects["myFactory"]   = MyFactoryBean
+```
+
+如果命中的是普通 Bean，`getObjectForBeanInstance()` 直接返回它。如果命中的是 `FactoryBean`，还要继续看原始 `name`：
+
+```text
+原始 name = "myFactory"   → 返回 FactoryBean.getObject() 产品
+原始 name = "&myFactory"  → 返回 MyFactoryBean 工厂本身
+```
+
+所以缓存命中解决的是“工厂对象或普通对象是否已经存在”，`getObjectForBeanInstance()` 解决的是“这次调用最终应该暴露哪个对象”。
+
+#### 4.4 第三步：prototype 循环依赖检查
 
 ```java
 if (isPrototypeCurrentlyInCreation(beanName)) {
@@ -330,7 +395,7 @@ if (isPrototypeCurrentlyInCreation(beanName)) {
 
 prototype 每次获取都创建新实例，没有单例缓存和早期暴露机制，因此 Spring 无法使用三级缓存解决 prototype 循环依赖。
 
-### 4.5 第四步：父容器委派
+#### 4.5 第四步：父容器委派
 
 ```java
 BeanFactory parentBeanFactory = getParentBeanFactory();
@@ -347,7 +412,7 @@ if (parentBeanFactory != null && !containsBeanDefinition(beanName)) {
 - 子容器可以覆盖父容器同名 Bean
 - 父容器不能反向获取子容器 Bean
 
-### 4.6 第五步：标记 Bean 即将创建
+#### 4.6 第五步：标记 Bean 即将创建
 
 ```java
 if (!typeCheckOnly) {
@@ -355,9 +420,13 @@ if (!typeCheckOnly) {
 }
 ```
 
-这一步会影响 merged BeanDefinition 缓存。如果一个 BeanDefinition 在创建前被修改，Spring 需要重新合并，而不是继续使用旧缓存。
+这一步不创建对象，它只改变容器的内部状态：告诉 Spring “这个 Bean 现在要进入真正创建流程了”。
 
-### 4.7 第六步：获取合并后的 RootBeanDefinition
+在此之前，容器可能只是为了类型匹配、候选判断而读取过 BeanDefinition，并缓存过一次 merged BeanDefinition。真正创建前，Spring 会把当前 Bean 记入 `alreadyCreated`，并在必要时清理旧的 merged BeanDefinition 缓存。
+
+这样下一步 `getMergedLocalBeanDefinition(beanName)` 拿到的就是最终版本，而不是类型检查阶段留下的旧合并结果。`typeCheckOnly` 为 true 时跳过这一步，因为单纯类型检查不应该把 Bean 标记为已经进入创建阶段。
+
+#### 4.7 第六步：获取合并后的 RootBeanDefinition
 
 ```java
 RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);
@@ -374,7 +443,7 @@ checkMergedBeanDefinition(mbd, beanName, args);
 - initMethod、destroyMethod
 - methodOverrides
 
-### 4.8 第七步：先创建 dependsOn Bean
+#### 4.8 第七步：先创建 dependsOn Bean
 
 ```java
 String[] dependsOn = mbd.getDependsOn();
@@ -395,9 +464,9 @@ public class OrderService {
 
 Spring 还会检测 `dependsOn` 形成的显式循环，并抛出 `BeanCreationException`。
 
-### 4.9 第八步：根据 Scope 创建
+#### 4.9 第八步：根据 Scope 创建
 
-#### singleton
+##### singleton
 
 ```java
 sharedInstance = getSingleton(beanName, () -> {
@@ -407,7 +476,7 @@ sharedInstance = getSingleton(beanName, () -> {
 
 同一个 BeanFactory 内只创建一次，并由单例注册表管理。
 
-#### prototype
+##### prototype
 
 ```java
 beforePrototypeCreation(beanName);
@@ -417,7 +486,7 @@ afterPrototypeCreation(beanName);
 
 每次 `getBean()` 都创建新实例，容器不负责完整销毁生命周期。
 
-#### 自定义 Scope
+##### 自定义 Scope
 
 ```java
 Scope scope = this.scopes.get(scopeName);
@@ -428,7 +497,7 @@ Object scopedInstance = scope.get(beanName, () -> {
 
 request、session 等作用域的实例保存位置由对应 `Scope` 实现决定。
 
-### 4.10 doGetBean() 流程图
+#### 4.10 doGetBean() 流程图
 
 ```text
 doGetBean(name)
@@ -453,9 +522,9 @@ doGetBean(name)
 
 ---
 
-## 五、BeanDefinition 合并与依赖关系
+### 五、BeanDefinition 合并与依赖关系
 
-### 5.1 为什么需要 merged BeanDefinition
+#### 5.1 为什么需要 merged BeanDefinition
 
 Spring 支持 BeanDefinition 继承：
 
@@ -470,13 +539,20 @@ Spring 支持 BeanDefinition 继承：
 
 即使主要使用注解配置，Spring 内部也统一转换为 `RootBeanDefinition`，让后续创建流程不再区分原始定义类型。
 
-### 5.2 合并结果什么时候缓存
+#### 5.2 合并结果什么时候缓存
 
-`getMergedLocalBeanDefinition()` 会缓存合并结果，避免每次 `getBean()` 重复计算。
+`getMergedLocalBeanDefinition()` 会先查 `mergedBeanDefinitions` 缓存。
 
-但在真正创建之前，`markBeanAsCreated()` 会确保被修改过的 BeanDefinition 能重新合并。
+```text
+缓存命中且没有 stale 标记 → 直接返回 RootBeanDefinition
+缓存不存在或已经 stale     → 重新合并 BeanDefinition，再放入缓存
+```
 
-### 5.3 dependentBeanMap 与 dependenciesForBeanMap
+但这个缓存不是越早越好。类型检查、候选判断等流程可能提前触发合并；如果后续 BeanDefinition 又被修改，早期合并结果就可能过期。
+
+所以真正创建前会先执行 `markBeanAsCreated(beanName)`：它相当于划线，表示“从这里开始，这个 Bean 的创建元数据应该稳定下来”。必要时会清掉旧 merged BeanDefinition，让后续创建流程基于最终定义重新合并。
+
+#### 5.3 dependentBeanMap 与 dependenciesForBeanMap
 
 Spring 会维护两个方向的依赖关系：
 
@@ -497,9 +573,9 @@ dependenciesForBeanMap:
 
 ---
 
-## 六、单例创建器 getSingleton()
+### 六、单例创建器 getSingleton()
 
-### 6.1 两个同名方法承担不同职责
+#### 6.1 两个同名方法承担不同职责
 
 ```java
 getSingleton(beanName)
@@ -513,7 +589,7 @@ getSingleton(beanName, singletonFactory)
 
 用于保证一个单例只被创建一次，并管理创建前后状态、异常清理和最终入池。
 
-### 6.2 真正创建单例的模板
+#### 6.2 真正创建单例的模板
 
 ```java
 public Object getSingleton(String beanName, ObjectFactory<?> singletonFactory) {
@@ -549,7 +625,7 @@ public Object getSingleton(String beanName, ObjectFactory<?> singletonFactory) {
 }
 ```
 
-### 6.3 beforeSingletonCreation()
+#### 6.3 beforeSingletonCreation()
 
 ```java
 protected void beforeSingletonCreation(String beanName) {
@@ -562,7 +638,7 @@ protected void beforeSingletonCreation(String beanName) {
 
 它把 Bean 名称加入“正在创建集合”。重复加入通常意味着出现了无法通过早期引用处理的创建路径。
 
-### 6.4 创建失败为什么必须清理
+#### 6.4 创建失败为什么必须清理
 
 创建过程中可能已经产生：
 
@@ -572,9 +648,11 @@ protected void beforeSingletonCreation(String beanName) {
 - 销毁回调
 - 被递归创建的其他单例
 
-如果失败后不清理，下一次创建会读到污染状态。`doGetBean()` 中创建单例的回调捕获到 `BeansException` 后会调用 `destroySingleton(beanName)` 清理缓存和销毁信息；`getSingleton()` 同时会收集 suppressed exceptions，作为 `BeanCreationException` 的关联原因帮助定位根因。
+如果失败后不清理，下一次创建会读到污染状态。
 
-### 6.5 addSingleton() 的最终动作
+`doGetBean()` 中创建单例的回调捕获到 `BeansException` 后，会调用 `destroySingleton(beanName)` 清理缓存和销毁信息。`getSingleton()` 同时会收集 suppressed exceptions，作为 `BeanCreationException` 的关联原因帮助定位根因。
+
+#### 6.5 addSingleton() 的最终动作
 
 ```java
 protected void addSingleton(String beanName, Object singletonObject) {
@@ -589,9 +667,9 @@ protected void addSingleton(String beanName, Object singletonObject) {
 
 Bean 进入一级缓存时，二级和三级缓存中的同名数据必须删除。
 
-## 七、createBean()：正式创建前的最后一道门
+### 七、createBean()：正式创建前的最后一道门
 
-### 7.1 createBean() 的核心职责
+#### 7.1 createBean() 的核心职责
 
 ```java
 protected Object createBean(
@@ -618,7 +696,7 @@ protected Object createBean(
 1. 准备 BeanClass、方法覆盖等创建元数据。
 2. 给 `InstantiationAwareBeanPostProcessor` 一次“绕过默认创建流程”的机会。
 
-### 7.2 resolveBeforeInstantiation()
+#### 7.2 resolveBeforeInstantiation()
 
 调用链：
 
@@ -639,7 +717,7 @@ resolveBeforeInstantiation()
 
 这是一种“短路创建”。
 
-### 7.3 它是否就是普通 AOP 代理入口
+#### 7.3 它是否就是普通 AOP 代理入口
 
 不完全是。
 
@@ -649,9 +727,9 @@ resolveBeforeInstantiation()
 
 ---
 
-## 八、doCreateBean()：Bean 创建的核心模板
+### 八、doCreateBean()：Bean 创建的核心模板
 
-### 8.1 源码主线
+#### 8.1 源码主线
 
 ```java
 protected Object doCreateBean(
@@ -687,7 +765,7 @@ protected Object doCreateBean(
 }
 ```
 
-### 8.2 八个关键阶段
+#### 8.2 八个关键阶段
 
 ```text
 1. createBeanInstance()                    创建原始对象
@@ -700,7 +778,7 @@ protected Object doCreateBean(
 8. registerDisposableBeanIfNecessary()     注册销毁逻辑
 ```
 
-### 8.3 为什么先解析注入元数据再暴露早期引用
+#### 8.3 为什么先解析注入元数据再暴露早期引用
 
 `MergedBeanDefinitionPostProcessor` 会提前分析 BeanClass，例如：
 
@@ -709,9 +787,20 @@ protected Object doCreateBean(
 - 哪些成员标注了 `@Resource`
 - 哪些销毁方法需要注册
 
-这些结果会被缓存。后续 `populateBean()` 只需要执行注入，不必重复扫描整个类。
+这一步发生在 `createBeanInstance()` 之后，因为只有对象实例化完成后，Spring 才能确定真实 Bean 类型。
 
-### 8.4 为什么注册销毁回调时传入原始 bean
+顺序是：
+
+```text
+createBeanInstance()                       得到原始对象和真实 Class
+applyMergedBeanDefinitionPostProcessors()  解析并缓存字段、方法、生命周期元数据
+addSingletonFactory()                      必要时允许其他 Bean 拿早期引用
+populateBean()                             按刚才缓存的元数据执行注入
+```
+
+关键不是“已经注入了”，而是“注入计划已经确定了”。如果后面因为循环依赖暴露早期引用，外部拿到的仍是一个尚未填充完成的对象；但 Spring 自己已经知道后续要给它注入哪些字段、调用哪些生命周期方法。
+
+#### 8.4 为什么注册销毁回调时传入原始 bean
 
 销毁适配器需要识别目标类上的：
 
@@ -723,9 +812,10 @@ protected Object doCreateBean(
 
 ---
 
-## 九、createBeanInstance()：到底怎样实例化对象
+## 第二部分：关键分支
+### 九、createBeanInstance()：到底怎样实例化对象
 
-### 9.1 实例化策略总览
+#### 9.1 实例化策略总览
 
 Spring Framework `6.1.17` 的主要分支顺序如下：
 
@@ -746,7 +836,7 @@ createBeanInstance()
   └── instantiateBean() 使用默认构造器
 ```
 
-### 9.2 Supplier 实例化
+#### 9.2 Supplier 实例化
 
 ```java
 RootBeanDefinition bd = new RootBeanDefinition(OrderService.class);
@@ -762,7 +852,7 @@ obtainFromSupplier(instanceSupplier, beanName, mbd);
 
 `Supplier` 主要用于编程式 BeanDefinition 注册，不等同于普通 `@Bean` 方法。
 
-### 9.3 @Bean 工厂方法实例化
+#### 9.3 @Bean 工厂方法实例化
 
 ```java
 @Configuration
@@ -797,7 +887,7 @@ createBeanInstance()
 
 静态工厂方法没有 `factoryBeanName`，直接在 BeanClass 上调用静态方法。
 
-### 9.4 默认构造器实例化
+#### 9.4 默认构造器实例化
 
 如果没有 Supplier、工厂方法、需要自动装配的构造器或显式构造参数，最终进入：
 
@@ -815,7 +905,7 @@ CglibSubclassingInstantiationStrategy
   └── 存在 lookup-method / replaced-method 时生成 CGLIB 子类
 ```
 
-### 9.5 BeanWrapper 的作用
+#### 9.5 BeanWrapper 的作用
 
 实例化结果不是直接返回对象，而是包装为 `BeanWrapper`：
 
@@ -834,9 +924,9 @@ BeanWrapper bw = new BeanWrapperImpl(beanInstance);
 
 ---
 
-## 十、构造器选择与参数解析
+### 十、构造器选择与参数解析
 
-### 10.1 单构造器为什么可以不写 @Autowired
+#### 10.1 单构造器为什么可以不写 @Autowired
 
 ```java
 @Service
@@ -852,7 +942,7 @@ public class OrderService {
 
 当类只有一个非默认构造器时，`AutowiredAnnotationBeanPostProcessor.determineCandidateConstructors()` 会把它作为候选构造器。
 
-### 10.2 多构造器规则
+#### 10.2 多构造器规则
 
 ```java
 @Service
@@ -875,7 +965,7 @@ public class OrderService {
 - 有默认构造器时，它可以作为非 required 候选的回退
 - 没有 `@Autowired` 且只有一个带参构造器时，使用该构造器
 
-### 10.3 ConstructorResolver 如何选择最佳构造器
+#### 10.3 ConstructorResolver 如何选择最佳构造器
 
 候选构造器不会简单按参数数量匹配，核心过程是：
 
@@ -891,7 +981,7 @@ public class OrderService {
 9. 缓存 resolvedConstructorOrFactoryMethod 和参数信息
 ```
 
-### 10.4 贪婪构造器不等于无条件选择参数最多的
+#### 10.4 贪婪构造器不等于无条件选择参数最多的
 
 参数更多的构造器只有在所有依赖都能够解析、类型转换成功且权重更优时才会被选中。
 
@@ -907,7 +997,7 @@ public OrderService(UserService userService) {
 
 如果 `MissingService` 不存在且第一个构造器不是 required，Spring 可以继续尝试参数较少的候选构造器。
 
-### 10.5 构造器循环依赖为什么无法解决
+#### 10.5 构造器循环依赖为什么无法解决
 
 ```text
 创建 A
@@ -921,9 +1011,9 @@ public OrderService(UserService userService) {
 
 ---
 
-## 十一、MergedBeanDefinitionPostProcessor
+### 十一、MergedBeanDefinitionPostProcessor
 
-### 11.1 为什么需要这个阶段
+#### 11.1 为什么需要这个阶段
 
 实例化完成后，Spring 已经知道真实 Bean 类型，可以让后处理器解析类级元数据：
 
@@ -939,7 +1029,7 @@ applyMergedBeanDefinitionPostProcessors(mbd, beanType, beanName);
 | `CommonAnnotationBeanPostProcessor` | 解析 `@Resource` 等通用注解 |
 | `InitDestroyAnnotationBeanPostProcessor` | 解析 `@PostConstruct`、`@PreDestroy` |
 
-### 11.2 此时只是解析，不是注入
+#### 11.2 此时只是解析，不是注入
 
 以 `AutowiredAnnotationBeanPostProcessor` 为例：
 
@@ -955,7 +1045,7 @@ postProcessMergedBeanDefinition()
 
 真正注入发生在后面的 `postProcessProperties()`。
 
-### 11.3 为什么元数据要缓存
+#### 11.3 为什么元数据要缓存
 
 反射扫描字段和方法成本较高。对于 prototype Bean，如果每次创建都重新扫描，会产生额外开销。
 
@@ -963,9 +1053,9 @@ postProcessMergedBeanDefinition()
 
 ---
 
-## 十二、populateBean()：属性填充与依赖注入
+### 十二、populateBean()：属性填充与依赖注入
 
-### 12.1 完整顺序
+#### 12.1 完整顺序
 
 ```text
 populateBean()
@@ -983,7 +1073,7 @@ populateBean()
   └── applyPropertyValues()
 ```
 
-### 12.2 postProcessAfterInstantiation() 可以阻止注入
+#### 12.2 postProcessAfterInstantiation() 可以阻止注入
 
 ```java
 if (!bp.postProcessAfterInstantiation(bean, beanName)) {
@@ -995,7 +1085,7 @@ if (!bp.postProcessAfterInstantiation(bean, beanName)) {
 
 业务项目一般不应随意使用，否则容易造成字段为空且排查困难。
 
-### 12.3 byName 与 byType 是 BeanDefinition 级自动装配
+#### 12.3 byName 与 byType 是 BeanDefinition 级自动装配
 
 ```java
 mbd.setAutowireMode(AbstractBeanDefinition.AUTOWIRE_BY_NAME);
@@ -1009,7 +1099,7 @@ mbd.setAutowireMode(AbstractBeanDefinition.AUTOWIRE_BY_TYPE);
 
 现代注解项目主要使用后者。
 
-### 12.4 @Autowired 字段注入
+#### 12.4 @Autowired 字段注入
 
 ```text
 AutowiredAnnotationBeanPostProcessor.postProcessProperties()
@@ -1023,7 +1113,7 @@ AutowiredAnnotationBeanPostProcessor.postProcessProperties()
 
 因此字段注入一定发生在构造器执行之后。
 
-### 12.5 @Autowired 方法注入
+#### 12.5 @Autowired 方法注入
 
 ```java
 @Autowired
@@ -1035,7 +1125,7 @@ Spring 会分别解析每个方法参数，然后通过反射调用该方法。
 
 Setter 注入只是方法注入的一种常见形式，方法名称不必须以 `set` 开头。
 
-### 12.6 @Value 的本质
+#### 12.6 @Value 的本质
 
 ```java
 @Value("${order.timeout:3000}")
@@ -1051,7 +1141,7 @@ AutowireCandidateResolver.getSuggestedValue()
   └── TypeConverter.convertIfNecessary()
 ```
 
-### 12.7 applyPropertyValues()
+#### 12.7 applyPropertyValues()
 
 BeanDefinition 中显式配置的属性最终在这里写入：
 
@@ -1065,15 +1155,15 @@ MutablePropertyValues
 
 ---
 
-## 十三、resolveDependency()：依赖到底怎样找到
+### 十三、resolveDependency()：依赖到底怎样找到
 
-### 13.1 doResolveDependency() 五步
+#### 13.1 doResolveDependency() 五步
 
 Spring Framework `6.1.17` 的主线：
 
 ```text
 Step 1：descriptor.resolveShortcut()
-  └── 使用已缓存的快捷解析结果
+  └── 如果依赖描述符已经记录了目标 beanName，直接 getBean(beanName, type)
 
 Step 2：处理 @Value
   └── 占位符 / SpEL / 类型转换
@@ -1089,7 +1179,11 @@ Step 5：解析最终候选实例并校验类型
   └── descriptor.resolveCandidate() → getBean()
 ```
 
-### 13.2 findAutowireCandidates()
+Step 1 不是直接复用上一次注入得到的对象，而是复用“上次已经确定的 Bean 名称”。
+
+例如某个 `@Autowired` 字段第一次解析后确认应该注入 `userService`，后续同一注入点可以通过 `ShortcutDependencyDescriptor` 直接调用 `getBean("userService", UserService.class)`，避免再次走完整候选筛选和消歧。
+
+#### 13.2 findAutowireCandidates()
 
 它先找到目标类型的候选 Bean 名称，然后逐个判断：
 
@@ -1100,7 +1194,7 @@ Step 5：解析最终候选实例并校验类型
 - 是否为 fallback 候选
 - 是否来自父容器
 
-### 13.3 多候选的消歧顺序
+#### 13.3 多候选的消歧顺序
 
 Spring Framework `6.1.17` 的 `determineAutowireCandidate()` 顺序是：
 
@@ -1112,9 +1206,18 @@ Spring Framework `6.1.17` 的 `determineAutowireCandidate()` 顺序是：
 5. 仍无法确定 → NoUniqueBeanDefinitionException
 ```
 
-`@Qualifier` 通常在进入此步骤前，就已经参与候选过滤。
+这里容易误解：`@Qualifier` 通常不是在这一步“排序”，而是在前面的 `findAutowireCandidates()` 中先过滤候选。
 
-### 13.4 示例
+也就是说，流程更像这样：
+
+```text
+先过滤：类型、泛型、@Qualifier、autowireCandidate 等条件
+再消歧：@Primary → @Priority → resolvableDependencies → 注入点名称匹配
+```
+
+字段名匹配发生得比很多人想象得晚。比如字段名是 `alipayPaymentService`，但另一个候选标了 `@Primary`，最终仍会优先选择 `@Primary`。
+
+#### 13.4 示例
 
 ```java
 public interface PaymentService {
@@ -1145,7 +1248,7 @@ private PaymentService paymentService;
 
 候选过滤后只剩支付宝实现。
 
-### 13.5 集合注入
+#### 13.5 集合注入
 
 ```java
 @Autowired
@@ -1164,7 +1267,7 @@ resolveMultipleBeans()
 
 可以通过 `@Order`、`Ordered` 或 `@Priority` 影响集合顺序。
 
-### 13.6 ObjectProvider 为什么能延迟创建
+#### 13.6 ObjectProvider 为什么能延迟创建
 
 ```java
 private final ObjectProvider<ReportService> provider;
@@ -1182,9 +1285,9 @@ provider.orderedStream();
 
 ---
 
-## 十四、initializeBean()：初始化与代理增强
+### 十四、initializeBean()：初始化与代理增强
 
-### 14.1 精确调用顺序
+#### 14.1 精确调用顺序
 
 ```java
 protected Object initializeBean(
@@ -1207,7 +1310,7 @@ protected Object initializeBean(
 }
 ```
 
-### 14.2 Aware 回调分成两组
+#### 14.2 Aware 回调分成两组
 
 第一组由 `invokeAwareMethods()` 直接调用：
 
@@ -1229,7 +1332,7 @@ ApplicationStartupAware
 ApplicationContextAware
 ```
 
-### 14.3 @PostConstruct 在哪里执行
+#### 14.3 @PostConstruct 在哪里执行
 
 `@PostConstruct` 不在 `invokeInitMethods()` 中执行。
 
@@ -1244,7 +1347,7 @@ applyBeanPostProcessorsBeforeInitialization()
 
 这里的 `invokeInitMethods()` 是后处理器自己的方法，不是 `AbstractAutowireCapableBeanFactory.invokeInitMethods()`，两者不要混淆。
 
-### 14.4 Spring 初始化方法顺序
+#### 14.4 Spring 初始化方法顺序
 
 ```text
 1. BeanNameAware / BeanClassLoaderAware / BeanFactoryAware
@@ -1253,10 +1356,10 @@ applyBeanPostProcessorsBeforeInitialization()
 4. InitializingBean.afterPropertiesSet()
 5. 自定义 init-method
 6. BeanPostProcessor.postProcessAfterInitialization()
-7. 通常在此生成最终 AOP 代理
+   └── AbstractAutoProxyCreator 通常在这里返回最终 AOP 代理
 ```
 
-### 14.5 自定义初始化方法
+#### 14.5 自定义初始化方法
 
 ```java
 @Bean(initMethod = "customInit")
@@ -1275,7 +1378,7 @@ public OrderService orderService() {
 
 如果自定义方法名与 `afterPropertiesSet()` 相同，Spring 会避免无意义的重复调用。
 
-### 14.6 为什么 @PostConstruct 中事务通常不生效
+#### 14.6 为什么 @PostConstruct 中事务通常不生效
 
 ```java
 @PostConstruct
@@ -1295,9 +1398,9 @@ public void createOrder() {
 
 如果初始化逻辑必须使用事务，考虑拆分到另一个 Bean，或在应用就绪事件之后通过代理调用。
 
-## 十五、AOP 代理究竟在哪个阶段生成
+### 十五、AOP 代理究竟在哪个阶段生成
 
-### 15.1 普通场景
+#### 15.1 普通场景
 
 正常情况下：
 
@@ -1321,7 +1424,7 @@ exposedObject  = 代理对象
 
 最终一级缓存中保存的是 `exposedObject`。
 
-### 15.2 循环依赖场景为什么可能提前创建代理
+#### 15.2 循环依赖场景为什么可能提前创建代理
 
 如果 A 依赖 B，B 又依赖 A：
 
@@ -1341,7 +1444,7 @@ getEarlyBeanReference(A)
 AbstractAutoProxyCreator 提前为 A 创建代理
 ```
 
-### 15.3 getEarlyBeanReference()
+#### 15.3 getEarlyBeanReference()
 
 ```java
 protected Object getEarlyBeanReference(
@@ -1362,7 +1465,7 @@ protected Object getEarlyBeanReference(
 
 `AbstractAutoProxyCreator` 是最重要的实现之一。它会记录该 Bean 已参与早期代理流程，避免初始化后再次创建另一个代理。
 
-### 15.4 早期引用一致性检查
+#### 15.4 早期引用一致性检查
 
 `doCreateBean()` 初始化完成后会再次检查：
 
@@ -1383,7 +1486,7 @@ if (earlySingletonReference != null) {
 
 主要处理两种情况：
 
-#### 情况一：初始化后没有产生新对象
+##### 情况一：初始化后没有产生新对象
 
 ```text
 exposedObject == bean
@@ -1391,7 +1494,7 @@ exposedObject == bean
 
 说明最终初始化没有再包装对象。如果之前存在早期代理，应把最终暴露对象替换为该早期代理。
 
-#### 情况二：初始化后产生新代理，但其他 Bean 已拿到原始对象
+##### 情况二：初始化后产生新代理，但其他 Bean 已拿到原始对象
 
 此时容器外部可能同时存在两个版本：
 
@@ -1404,9 +1507,9 @@ B 持有原始 A
 
 ---
 
-## 十六、三级缓存与循环依赖完整推演
+### 十六、三级缓存与循环依赖完整推演
 
-### 16.1 三级缓存定义
+#### 16.1 三级缓存定义
 
 ```java
 // 一级缓存：完整单例
@@ -1425,7 +1528,7 @@ private final Map<String, ObjectFactory<?>> singletonFactories;
 | 二级缓存 | 已生成的早期对象或代理 | 第一次真正请求早期引用时 | Bean 进入一级缓存时 |
 | 三级缓存 | `ObjectFactory` | 原始对象实例化后、属性填充前 | 转入二级缓存或一级缓存时 |
 
-### 16.2 查询缓存的真实条件
+#### 16.2 查询缓存的真实条件
 
 ```java
 protected Object getSingleton(String beanName, boolean allowEarlyReference) {
@@ -1452,7 +1555,7 @@ protected Object getSingleton(String beanName, boolean allowEarlyReference) {
 
 只有 Bean 正在创建时，才会继续查询二级和三级缓存。正常使用一个已完成 Bean 时只需要查询一级缓存。
 
-### 16.3 A、B 字段循环依赖时间线
+#### 16.3 A、B 字段循环依赖时间线
 
 假设：
 
@@ -1509,7 +1612,7 @@ spring.main.allow-circular-references=true
 25. 删除 A 的二级、三级缓存记录
 ```
 
-### 16.4 为什么需要三级而不是二级
+#### 16.4 为什么需要三级而不是二级
 
 如果实例化完成后直接把原始对象放进二级缓存：
 
@@ -1529,7 +1632,7 @@ A 初始化后又被包装为代理 A
 
 三级缓存保存 `ObjectFactory`，把“是否生成早期代理”的决定推迟到其他 Bean 真正请求该引用的时刻。
 
-### 16.5 Spring 能解决哪些循环依赖
+#### 16.5 Spring 能解决哪些循环依赖
 
 | 场景 | Framework 能力 | Boot 3.3.9 默认行为 |
 |------|----------------|--------------------|
@@ -1540,7 +1643,7 @@ A 初始化后又被包装为代理 A
 | `@Lazy` 代理打断依赖 | 可以避免立即获取真实对象 | 可用 |
 | `@Async` 等晚期代理 | 可能出现早期对象与最终代理不一致 | 应重构 |
 
-### 16.6 最佳实践
+#### 16.6 最佳实践
 
 不要把三级缓存当作业务架构工具。
 
@@ -1561,9 +1664,10 @@ A 初始化后又被包装为代理 A
 
 ---
 
-## 十七、FactoryBean 创建流程
+## 第三部分：专题扩展
+### 十七、FactoryBean 创建流程
 
-### 17.1 FactoryBean 是什么
+#### 17.1 FactoryBean 是什么
 
 ```java
 public interface FactoryBean<T> {
@@ -1577,7 +1681,7 @@ public interface FactoryBean<T> {
 
 它本身是一个由 Spring 管理的 Bean，但它还能生产另一个对象。
 
-### 17.2 两种获取方式
+#### 17.2 两种获取方式
 
 ```java
 context.getBean("myFactory");
@@ -1591,7 +1695,7 @@ context.getBean("&myFactory");
 
 返回 `FactoryBean` 工厂本身。
 
-### 17.3 getObjectForBeanInstance()
+#### 17.3 getObjectForBeanInstance()
 
 ```text
 getObjectForBeanInstance(beanInstance, name, beanName, mbd)
@@ -1604,7 +1708,7 @@ getObjectForBeanInstance(beanInstance, name, beanName, mbd)
       └── getObjectFromFactoryBean()
 ```
 
-### 17.4 产品对象缓存
+#### 17.4 产品对象缓存
 
 FactoryBean 产品有独立缓存：
 
@@ -1627,7 +1731,7 @@ factoryBeanObjectCache["myFactory"]
 - FactoryBean 自身是容器单例
 - `FactoryBean.isSingleton()` 返回 true
 
-### 17.5 产品对象也会执行后处理器
+#### 17.5 产品对象也会执行后处理器
 
 ```text
 FactoryBean.getObject()
@@ -1639,7 +1743,7 @@ BeanPostProcessor.postProcessAfterInitialization()
 
 产品对象通常不会走完整的普通 Bean 创建模板，但仍可能被后处理器包装。
 
-### 17.6 SmartFactoryBean
+#### 17.6 SmartFactoryBean
 
 `SmartFactoryBean` 增加：
 
@@ -1650,9 +1754,9 @@ BeanPostProcessor.postProcessAfterInitialization()
 
 ---
 
-## 十八、Scope、懒加载与跨作用域注入
+### 十八、Scope、懒加载与跨作用域注入
 
-### 18.1 singleton 注入 prototype 的陷阱
+#### 18.1 singleton 注入 prototype 的陷阱
 
 ```java
 @Service
@@ -1690,7 +1794,7 @@ public void export() {
 - 注入 `ObjectFactory<T>`
 - 重新设计对象边界
 
-### 18.2 scoped proxy
+#### 18.2 scoped proxy
 
 ```java
 @RequestScope
@@ -1710,9 +1814,9 @@ RequestContext proxy
 
 因此代理本身可以安全地作为 singleton 依赖存在。
 
-### 18.3 @Lazy 的两种含义
+#### 18.3 @Lazy 的两种含义
 
-#### 标注在 Bean 上
+##### 标注在 Bean 上
 
 ```java
 @Lazy
@@ -1721,18 +1825,37 @@ public class ReportService {
 }
 ```
 
-表示跳过容器启动时的主动预实例化。
+表示这个 BeanDefinition 在容器启动的 `preInstantiateSingletons()` 阶段不主动创建。
 
-#### 标注在注入点上
+但如果某个非懒单例直接依赖它：
+
+```java
+@Service
+public class OrderService {
+    public OrderService(ReportService reportService) {
+    }
+}
+```
+
+Spring 为了创建 `OrderService`，仍然需要先拿到真实 `ReportService`，所以 `ReportService` 可能在启动期被依赖解析提前创建。
+
+##### 标注在注入点上
 
 ```java
 public OrderService(@Lazy ReportService reportService) {
 }
 ```
 
-表示注入一个延迟解析目标 Bean 的代理，可以打断部分构造器依赖链。
+表示注入的不是立即创建出来的真实 `ReportService`，而是一个延迟代理。
 
-### 18.4 ObjectProvider 与 @Lazy 的选择
+```text
+创建 OrderService 时：注入 ReportService proxy
+第一次调用 proxy 方法时：proxy 再去 getBean("reportService")
+```
+
+所以 Bean 上的 `@Lazy` 控制“容器是否主动创建它”，注入点上的 `@Lazy` 控制“当前依赖是否立刻解析真实对象”。
+
+#### 18.4 ObjectProvider 与 @Lazy 的选择
 
 | 需求 | 推荐方式 |
 |------|----------|
@@ -1744,15 +1867,15 @@ public OrderService(@Lazy ReportService reportService) {
 
 ---
 
-## 十九、Bean 销毁流程
+### 十九、Bean 销毁流程
 
-### 19.1 哪些 Bean 会自动销毁
+#### 19.1 哪些 Bean 会自动销毁
 
 容器主要负责 singleton 和由 Scope 管理的 Bean 销毁。
 
 prototype Bean 创建完成后交给调用方，Spring 不会自动执行其完整销毁回调。
 
-### 19.2 注册销毁适配器
+#### 19.2 注册销毁适配器
 
 创建阶段结束前：
 
@@ -1768,7 +1891,7 @@ registerDisposableBeanIfNecessary(beanName, bean, mbd);
 - 推断出 `close` 或 `shutdown` 方法
 - `DestructionAwareBeanPostProcessor` 要处理该 Bean
 
-### 19.3 容器关闭主线
+#### 19.3 容器关闭主线
 
 ```text
 AbstractApplicationContext.close()
@@ -1779,7 +1902,7 @@ AbstractApplicationContext.close()
                   └── DisposableBeanAdapter.destroy()
 ```
 
-### 19.4 销毁顺序
+#### 19.4 销毁顺序
 
 ```text
 1. 先销毁依赖当前 Bean 的 dependent Beans
@@ -1791,7 +1914,7 @@ AbstractApplicationContext.close()
 6. 清理依赖关系和缓存
 ```
 
-### 19.5 为什么依赖方先销毁
+#### 19.5 为什么依赖方先销毁
 
 如果 `OrderService` 依赖 `DataSource`：
 
@@ -1802,7 +1925,7 @@ AbstractApplicationContext.close()
 
 Spring 通过 `dependentBeanMap` 保证依赖方优先销毁。
 
-### 19.6 优雅关闭注意事项
+#### 19.6 优雅关闭注意事项
 
 ```yaml
 server:
@@ -1823,9 +1946,9 @@ spring:
 
 ---
 
-## 二十、异常、回滚与并发创建
+### 二十、异常、回滚与并发创建
 
-### 20.1 常见异常与阶段
+#### 20.1 常见异常与阶段
 
 | 异常 | 常见阶段 | 含义 |
 |------|----------|------|
@@ -1838,7 +1961,7 @@ spring:
 | `BeanNotOfRequiredTypeException` | 类型适配 | 最终对象类型不符合 requiredType |
 | `ScopeNotActiveException` | 自定义 Scope | request/session 等作用域当前未激活 |
 
-### 20.2 异常为什么经常嵌套很深
+#### 20.2 异常为什么经常嵌套很深
 
 ```text
 BeanCreationException: orderController
@@ -1849,13 +1972,13 @@ BeanCreationException: orderController
 
 排查时从最内层 `Caused by` 开始，而不是只看最外层 Bean 名称。
 
-### 20.3 单例创建的同步
+#### 20.3 单例创建的同步
 
 Spring Framework `6.1.17` 在单例创建路径中使用 `singletonObjects` 作为同步锁，保证同一个 BeanFactory 中的单例不会被多个线程重复创建。
 
 锁内部可能递归创建其他依赖 Bean。Java 的 `synchronized` 是可重入的，因此同线程递归进入不会死锁。
 
-### 20.4 不要在初始化阶段启动失控的异步任务
+#### 20.4 不要在初始化阶段启动失控的异步任务
 
 如果构造器或 `@PostConstruct` 立即启动新线程，并在新线程中查询尚未完成创建的 Bean，可能造成：
 
@@ -1871,9 +1994,9 @@ Spring Framework `6.1.17` 在单例创建路径中使用 `singletonObjects` 作�
 - Spring Boot `ApplicationReadyEvent`
 - `SmartLifecycle.start()`
 
-## 二十一、BeanPostProcessor 全阶段地图
+### 二十一、BeanPostProcessor 全阶段地图
 
-### 21.1 为什么 BeanPostProcessor 是理解创建流程的关键
+#### 21.1 为什么 BeanPostProcessor 是理解创建流程的关键
 
 Spring 的默认创建模板负责搭建骨架，真正的大量扩展能力来自后处理器：
 
@@ -1888,7 +2011,7 @@ AOP
 Aware 回调
 ```
 
-### 21.2 完整扩展点顺序
+#### 21.2 完整扩展点顺序
 
 | 阶段 | 扩展点 | 典型作用 |
 |------|--------|----------|
@@ -1900,11 +2023,11 @@ Aware 回调
 | 条件阶段 | `SmartInstantiationAwareBeanPostProcessor.getEarlyBeanReference()` | 依赖递归过程中按需创建早期代理，发生在当前 Bean 完成初始化之前 |
 | 6 | `BeanPostProcessor.postProcessBeforeInitialization()` | ApplicationContextAware、`@PostConstruct` 等初始化前处理 |
 | 7 | `BeanPostProcessor.postProcessAfterInitialization()` | AOP 等最终包装 |
-| 9 | `DestructionAwareBeanPostProcessor.postProcessBeforeDestruction()` | `@PreDestroy` 等销毁前回调 |
+| 销毁阶段 | `DestructionAwareBeanPostProcessor.postProcessBeforeDestruction()` | `@PreDestroy` 等销毁前回调 |
 
-### 21.3 三个最重要的内置后处理器
+#### 21.3 三个最重要的内置后处理器
 
-#### AutowiredAnnotationBeanPostProcessor
+##### AutowiredAnnotationBeanPostProcessor
 
 ```text
 determineCandidateConstructors()  → 选择 @Autowired 构造器
@@ -1912,7 +2035,7 @@ postProcessMergedBeanDefinition() → 缓存字段和方法注入元数据
 postProcessProperties()           → 执行 @Autowired / @Value 注入
 ```
 
-#### CommonAnnotationBeanPostProcessor
+##### CommonAnnotationBeanPostProcessor
 
 ```text
 postProcessMergedBeanDefinition() → 缓存 @Resource 元数据
@@ -1921,7 +2044,7 @@ postProcessBeforeInitialization() → 继承处理 @PostConstruct
 postProcessBeforeDestruction()    → 继承处理 @PreDestroy
 ```
 
-#### AbstractAutoProxyCreator
+##### AbstractAutoProxyCreator
 
 ```text
 postProcessBeforeInstantiation()  → 特殊 TargetSource 提前代理
@@ -1931,9 +2054,10 @@ postProcessAfterInitialization()  → 普通场景创建最终 AOP 代理
 
 ---
 
-## 二十二、源码阅读路线
+## 第四部分：调试、练习与复盘
+### 二十二、源码阅读路线
 
-### 22.1 第一条：从容器启动进入 Bean 创建
+#### 22.1 第一条：从容器启动进入 Bean 创建
 
 ```text
 AbstractApplicationContext.refresh()
@@ -1949,7 +2073,7 @@ AbstractBeanFactory.doGetBean()
 
 先理解“为什么创建这个 Bean”，不要一开始就陷入反射细节。
 
-### 22.2 第二条：单个 Bean 的完整创建
+#### 22.2 第二条：单个 Bean 的完整创建
 
 ```text
 AbstractAutowireCapableBeanFactory.createBean()
@@ -1962,7 +2086,7 @@ doCreateBean()
   └── initializeBean()
 ```
 
-### 22.3 第三条：构造器参数
+#### 22.3 第三条：构造器参数
 
 ```text
 createBeanInstance()
@@ -1978,7 +2102,7 @@ resolveAutowiredArgument()
 DefaultListableBeanFactory.resolveDependency()
 ```
 
-### 22.4 第四条：字段注入
+#### 22.4 第四条：字段注入
 
 ```text
 populateBean()
@@ -1992,7 +2116,7 @@ AutowiredFieldElement.inject()
 resolveDependency()
 ```
 
-### 22.5 第五条：循环依赖与 AOP
+#### 22.5 第五条：循环依赖与 AOP
 
 ```text
 doCreateBean()
@@ -2006,7 +2130,7 @@ getEarlyBeanReference()
 AbstractAutoProxyCreator.getEarlyBeanReference()
 ```
 
-### 22.6 第六条：销毁
+#### 22.6 第六条：销毁
 
 ```text
 AbstractApplicationContext.close()
@@ -2020,9 +2144,9 @@ DisposableBeanAdapter.destroy()
 
 ---
 
-## 二十三、IDEA 断点调试指南
+### 二十三、IDEA 断点调试指南
 
-### 23.1 主链断点
+#### 23.1 主链断点
 
 | 观察目标 | 类 | 方法 |
 |----------|----|------|
@@ -2040,7 +2164,7 @@ DisposableBeanAdapter.destroy()
 | AOP 代理 | `AbstractAutoProxyCreator` | `wrapIfNecessary()` |
 | 销毁 | `DisposableBeanAdapter` | `destroy()` |
 
-### 23.2 重点观察变量
+#### 23.2 重点观察变量
 
 ```text
 beanName
@@ -2060,7 +2184,7 @@ matchingBeans
 autowiredBeanName
 ```
 
-### 23.3 条件断点建议
+#### 23.3 条件断点建议
 
 如果容器 Bean 很多，在以下断点增加条件：
 
@@ -2080,7 +2204,7 @@ beanName.equals("a") || beanName.equals("b")
 descriptor.getDependencyType().getName().contains("PaymentService")
 ```
 
-### 23.4 调试时不要使用 toString()
+#### 23.4 调试时不要使用 toString()
 
 IDEA 自动计算变量的 `toString()` 可能触发：
 
@@ -2094,9 +2218,9 @@ IDEA 自动计算变量的 `toString()` 可能触发：
 
 ---
 
-## 二十四、八个必做实验
+### 二十四、八个必做实验
 
-### 24.1 实验一：构造器与字段注入时机
+#### 24.1 实验一：构造器与字段注入时机
 
 目标：证明字段注入发生在构造器之后。
 
@@ -2126,7 +2250,7 @@ populateBean()
 postProcessProperties()
 ```
 
-### 24.2 实验二：初始化顺序
+#### 24.2 实验二：初始化顺序
 
 让 Bean 同时实现：
 
@@ -2139,7 +2263,7 @@ postProcessProperties()
 
 记录输出顺序，并与第十四章对照。
 
-### 24.3 实验三：多候选依赖
+#### 24.3 实验三：多候选依赖
 
 依次测试：
 
@@ -2151,7 +2275,7 @@ postProcessProperties()
 
 在 `determineAutowireCandidate()` 观察最终选择。
 
-### 24.4 实验四：FactoryBean
+#### 24.4 实验四：FactoryBean
 
 ```java
 @Component("carFactory")
@@ -2177,11 +2301,11 @@ context.getBean("&carFactory");
 
 并查看 `singletonObjects` 与 `factoryBeanObjectCache`。
 
-### 24.5 实验五：singleton 注入 prototype
+#### 24.5 实验五：singleton 注入 prototype
 
 连续调用 singleton Bean 的业务方法，观察 prototype 对象是否变化；然后改用 `ObjectProvider` 再比较。
 
-### 24.6 实验六：普通循环依赖
+#### 24.6 实验六：普通循环依赖
 
 临时开启：
 
@@ -2193,7 +2317,7 @@ spring.main.allow-circular-references: true
 
 实验后必须恢复默认配置。
 
-### 24.7 实验七：循环依赖与 AOP
+#### 24.7 实验七：循环依赖与 AOP
 
 为 A 增加 `@Transactional`，观察：
 
@@ -2202,7 +2326,7 @@ spring.main.allow-circular-references: true
 - 一级缓存中 A 的类型
 - 两个对象是否为同一引用
 
-### 24.8 实验八：创建失败清理
+#### 24.8 实验八：创建失败清理
 
 ```java
 @PostConstruct
@@ -2220,45 +2344,45 @@ public void init() {
 
 ---
 
-## 二十五、常见错误认知
+### 二十五、常见错误认知
 
-### 25.1 “new 出对象就完成 Bean 创建了”
+#### 25.1 “new 出对象就完成 Bean 创建了”
 
 错误。构造器只完成实例化，后面还有属性填充、初始化、代理和销毁注册。
 
-### 25.2 “@Autowired 在构造器之前执行”
+#### 25.2 “@Autowired 在构造器之前执行”
 
 字段和方法注入发生在实例化之后。构造器参数注入属于实例化过程的一部分。
 
-### 25.3 “@PostConstruct 属于 invokeInitMethods()”
+#### 25.3 “@PostConstruct 属于 invokeInitMethods()”
 
 错误。它由 `InitDestroyAnnotationBeanPostProcessor` 在初始化前阶段调用。
 
-### 25.4 “AOP 代理一定在初始化后创建”
+#### 25.4 “AOP 代理一定在初始化后创建”
 
 普通情况如此，但循环依赖时可能通过 `getEarlyBeanReference()` 提前创建代理。
 
-### 25.5 “三级缓存解决所有循环依赖”
+#### 25.5 “三级缓存解决所有循环依赖”
 
 错误。构造器循环、prototype 循环以及某些晚期代理循环无法解决；Boot `3.3.9` 默认还禁止循环依赖。
 
-### 25.6 “FactoryBean 自己就是产品对象”
+#### 25.6 “FactoryBean 自己就是产品对象”
 
 错误。`FactoryBean` 是工厂 Bean，默认 BeanName 返回产品，`&BeanName` 才返回工厂。
 
-### 25.7 “@Lazy Bean 一定到第一次业务调用才创建”
+#### 25.7 “@Lazy Bean 一定到第一次业务调用才创建”
 
 错误。被非懒 Bean 直接依赖时，依赖解析仍可能提前创建它。
 
-### 25.8 “prototype Bean 会自动执行 @PreDestroy”
+#### 25.8 “prototype Bean 会自动执行 @PreDestroy”
 
 错误。Spring 通常不负责 prototype 的完整销毁，需要调用方自行释放资源。
 
 ---
 
-## 二十六、面试题与答题框架
+### 二十六、面试题与答题框架
 
-### 26.1 Spring Bean 的完整创建流程是什么
+#### 26.1 Spring Bean 的完整创建流程是什么
 
 答题框架：
 
@@ -2268,39 +2392,39 @@ public void init() {
 4. `doCreateBean()` 依次执行实例化、MergedBeanDefinition 后处理、早期暴露、属性填充、初始化、早期引用检查和销毁注册。
 5. 初始化后对象可能被 AOP 包装，最终对象进入一级缓存。
 
-### 26.2 实例化和初始化有什么区别
+#### 26.2 实例化和初始化有什么区别
 
 实例化是通过构造器、工厂方法或 Supplier 得到原始对象；初始化发生在属性注入之后，包括 Aware、`@PostConstruct`、`InitializingBean`、init-method 和 BeanPostProcessor 包装。
 
-### 26.3 为什么构造器循环依赖无法解决
+#### 26.3 为什么构造器循环依赖无法解决
 
 三级缓存是在原始对象实例化之后放入的，而构造器循环在实例化完成前就需要对方对象，没有可提前暴露的引用。
 
-### 26.4 为什么需要三级缓存
+#### 26.4 为什么需要三级缓存
 
 三级缓存保存 ObjectFactory，在真正需要早期引用时调用 `getEarlyBeanReference()`，从而按需暴露原始对象或早期代理，保证循环依赖双方与容器最终对象一致。
 
-### 26.5 @Autowired 在哪个阶段执行
+#### 26.5 @Autowired 在哪个阶段执行
 
 构造器候选由 `determineCandidateConstructors()` 参与实例化；字段和方法注入由 `postProcessProperties()` 在 `populateBean()` 阶段执行。
 
-### 26.6 @PostConstruct 在哪个阶段执行
+#### 26.6 @PostConstruct 在哪个阶段执行
 
 在 BeanPostProcessor 初始化前阶段，由 `InitDestroyAnnotationBeanPostProcessor` 调用，早于 `InitializingBean.afterPropertiesSet()` 和自定义 init-method。
 
-### 26.7 FactoryBean 和 BeanFactory 有什么区别
+#### 26.7 FactoryBean 和 BeanFactory 有什么区别
 
 `BeanFactory` 是 IOC 容器接口；`FactoryBean` 是容器中的特殊 Bean，用于生产另一个对象。
 
-### 26.8 BeanPostProcessor 为什么可能导致 Bean 提前创建
+#### 26.8 BeanPostProcessor 为什么可能导致 Bean 提前创建
 
 BeanPostProcessor 本身需要在普通 Bean 前实例化和注册。如果其构造器或创建方法依赖普通业务 Bean，就会导致业务 Bean 在后处理器链尚未完整时提前创建。
 
 ---
 
-## 二十七、生产实践建议
+### 二十七、生产实践建议
 
-### 27.1 优先构造器注入
+#### 27.1 优先构造器注入
 
 优点：
 
@@ -2310,7 +2434,7 @@ BeanPostProcessor 本身需要在普通 Bean 前实例化和注册。如果其�
 - 易于单元测试
 - 更容易暴露循环依赖设计问题
 
-### 27.2 不要在构造器中执行重型业务
+#### 27.2 不要在构造器中执行重型业务
 
 避免：
 
@@ -2322,7 +2446,7 @@ BeanPostProcessor 本身需要在普通 Bean 前实例化和注册。如果其�
 
 构造器只负责建立对象基本不变量。
 
-### 27.3 谨慎使用 @PostConstruct
+#### 27.3 谨慎使用 @PostConstruct
 
 适合：
 
@@ -2337,7 +2461,7 @@ BeanPostProcessor 本身需要在普通 Bean 前实例化和注册。如果其�
 - 调用不稳定外部服务
 - 创建无法关闭的线程
 
-### 27.4 避免业务代码主动 getBean()
+#### 27.4 避免业务代码主动 getBean()
 
 主动查询容器会：
 
@@ -2348,7 +2472,7 @@ BeanPostProcessor 本身需要在普通 Bean 前实例化和注册。如果其�
 
 真正需要动态获取时优先使用 `ObjectProvider`。
 
-### 27.5 自定义 BeanPostProcessor 必须轻量
+#### 27.5 自定义 BeanPostProcessor 必须轻量
 
 - 不要在构造器中依赖业务 Bean
 - 不要在每个 Bean 上重复做昂贵反射扫描
@@ -2356,11 +2480,11 @@ BeanPostProcessor 本身需要在普通 Bean 前实例化和注册。如果其�
 - 跳过基础设施 Bean 和不相关类型
 - 保持幂等，避免重复包装
 
-### 27.6 不依赖循环引用
+#### 27.6 不依赖循环引用
 
 Spring Boot 默认禁止循环依赖是在推动更清晰的架构。不要为了让旧设计启动而直接开启全局配置。
 
-### 27.7 控制启动阶段外部依赖
+#### 27.7 控制启动阶段外部依赖
 
 如果 Bean 初始化必须访问外部系统：
 
@@ -2372,9 +2496,9 @@ Spring Boot 默认禁止循环依赖是在推动更清晰的架构。不要为�
 
 ---
 
-## 二十八、七天学习路线
+### 二十八、七天学习路线
 
-### 第一天：只看主线
+#### 第一天：只看主线
 
 ```text
 preInstantiateSingletons()
@@ -2385,7 +2509,7 @@ doCreateBean()
 
 目标：能不看资料画出完整主链。
 
-### 第二天：实例化
+#### 第二天：实例化
 
 学习：
 
@@ -2395,7 +2519,7 @@ doCreateBean()
 - ConstructorResolver
 - BeanWrapper
 
-### 第三天：依赖注入
+#### 第三天：依赖注入
 
 学习：
 
@@ -2405,7 +2529,7 @@ doCreateBean()
 - doResolveDependency()
 - 多候选消歧
 
-### 第四天：生命周期与代理
+#### 第四天：生命周期与代理
 
 学习：
 
@@ -2415,15 +2539,15 @@ doCreateBean()
 - BeanPostProcessor
 - AbstractAutoProxyCreator
 
-### 第五天：三级缓存
+#### 第五天：三级缓存
 
 手工推演 A、B 循环依赖，观察三个缓存每一步的变化。
 
-### 第六天：FactoryBean、Scope 与销毁
+#### 第六天：FactoryBean、Scope 与销毁
 
 完成 FactoryBean、prototype、ObjectProvider、scoped proxy 和销毁实验。
 
-### 第七天：源码复述与面试
+#### 第七天：源码复述与面试
 
 要求自己在 15 分钟内讲清：
 
@@ -2435,7 +2559,7 @@ doCreateBean()
 
 ---
 
-## 二十九、最终总结
+## 最终总结
 
 Bean 创建不是一个方法，而是一套可扩展模板：
 
