@@ -334,12 +334,10 @@ around1.invoke()
 
 ## 九、调试 ReflectiveMethodInvocation
 
-建议断点：
+建议断点（本文只关注"链路推进"这一段；代理入口断点 `JdkDynamicAopProxy#invoke`、`CglibAopProxy.DynamicAdvisedInterceptor#intercept` 见 02-02，全量汇总见 02-07 §十）：
 
 ```text
 ReflectiveMethodInvocation#proceed()
-JdkDynamicAopProxy#invoke()
-CglibAopProxy.DynamicAdvisedInterceptor#intercept()
 DefaultAdvisorChainFactory#getInterceptorsAndDynamicInterceptionAdvice()
 ```
 

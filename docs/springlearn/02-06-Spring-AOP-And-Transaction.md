@@ -14,7 +14,8 @@ top_img: false
 # Spring AOP 与声明式事务
 
 > 本文承接 `02-05-Spring-AOP-Invocation-Chain.md`，专门解释 `@Transactional` 为什么本质上依赖 Spring AOP。  
-> 主线是：`@EnableTransactionManagement` 注册事务基础设施 -> 生成事务 Advisor -> 匹配 `@Transactional` 方法 -> `TransactionInterceptor` 进入 AOP 拦截器链。
+> 主线是：`@EnableTransactionManagement` 注册事务基础设施 -> 生成事务 Advisor -> 匹配 `@Transactional` 方法 -> `TransactionInterceptor` 进入 AOP 拦截器链。  
+> 边界说明：本文只讲"事务如何接入 AOP"。事务的传播行为、隔离级别、回滚规则、事务同步等完整语义见 `03-05-Spring-Transaction.md`。
 
 ---
 
@@ -46,12 +47,7 @@ public void createOrder() {
 
 > `@Transactional` 的本质，是 Spring 通过 AOP 代理把 `TransactionInterceptor` 插入到目标方法调用链中。
 
-这也是为什么事务会出现很多和 AOP 一样的失效场景：
-
-- 自调用失效。
-- 非 Spring Bean 不生效。
-- `final` 方法可能不生效。
-- 构造器或初始化早期调用不生效。
+这也是为什么事务会出现很多和 AOP 一样的失效场景（自调用、非 Spring Bean、`final`/`private` 方法、调用时机太早等）——其原理与排查见 `02-07-Spring-AOP-Limitations.md`，本文只展开事务特有的部分。
 
 ---
 
@@ -306,34 +302,7 @@ public class OrderService {
 
 `this.saveOrder()` 没有经过代理对象，因此不会进入 `TransactionInterceptor`。
 
-解决方式和普通 AOP 一样，推荐拆分职责：
-
-```java
-@Service
-public class OrderFacade {
-
-    private final OrderService orderService;
-
-    public OrderFacade(OrderService orderService) {
-        this.orderService = orderService;
-    }
-
-    public void createOrder() {
-        orderService.saveOrder();
-    }
-}
-
-@Service
-public class OrderService {
-
-    @Transactional
-    public void saveOrder() {
-        System.out.println("save order");
-    }
-}
-```
-
-调用重新经过代理对象后，事务才会生效。
+解决方式和普通 AOP 一致（拆分到另一个 Bean / 注入自身代理 / `AopContext.currentProxy()`），代码与对比见 `02-07-Spring-AOP-Limitations.md` 的自调用解决方案总表。核心思路是让 `saveOrder()` 的调用重新经过代理对象。
 
 ---
 
@@ -411,15 +380,12 @@ TransactionInterceptor
 
 ## 十、调试 @Transactional 的 AOP 链路
 
-建议断点：
+建议断点（只保留事务专属；通用代理断点见 02-07 §十 全链路断点总表）：
 
 ```text
-AbstractAutoProxyCreator#wrapIfNecessary()
-AbstractAdvisorAutoProxyCreator#findEligibleAdvisors()
 BeanFactoryTransactionAttributeSourceAdvisor#getPointcut()
 TransactionAttributeSourcePointcut#matches()
 TransactionInterceptor#invoke()
-ReflectiveMethodInvocation#proceed()
 ```
 
 重点观察：

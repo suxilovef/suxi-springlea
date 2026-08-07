@@ -225,6 +225,15 @@ spring:
     proxy-target-class: true
 ```
 
+### Spring Boot 的默认行为
+
+Spring Boot 2.x 起 `spring.aop.proxy-target-class` 默认值为 `true`，即 **Spring Boot 应用默认强制使用 CGLIB 类代理**，会覆盖上述"有接口时优先 JDK"的默认逻辑。
+
+因此 Boot 项目中常见的是 `$$SpringCGLIB$$` 代理类名，且有两个连带影响：
+
+- 按实现类注入通常没问题（CGLIB 代理是目标类的子类）。
+- 目标类写成 `final` 会直接导致代理创建失败（`Cannot subclass final class`）。
+
 ---
 
 ## 四、代理方法调用链是怎么执行的
@@ -356,65 +365,7 @@ public class UserService {
 
 ### 如何解决自调用失效
 
-推荐优先拆分职责：
-
-```java
-@Service
-public class UserFacade {
-
-    private final UserService userService;
-
-    public UserFacade(UserService userService) {
-        this.userService = userService;
-    }
-
-    public void outer() {
-        userService.inner();
-    }
-}
-
-@Service
-public class UserService {
-
-    @Transactional
-    public void inner() {
-        System.out.println("inner");
-    }
-}
-```
-
-这样调用链重新经过代理对象：
-
-```text
-UserFacade
-  -> UserService 代理对象
-      -> inner()
-```
-
-也可以注入自身代理，但不如拆分职责清晰：
-
-```java
-@Service
-public class UserService {
-
-    private final UserService self;
-
-    public UserService(@Lazy UserService self) {
-        this.self = self;
-    }
-
-    public void outer() {
-        self.inner();
-    }
-
-    @Transactional
-    public void inner() {
-        System.out.println("inner");
-    }
-}
-```
-
-还可以使用 `AopContext.currentProxy()`，但它会让业务代码强依赖 Spring AOP，不建议作为常规方案。
+本文只解释"为什么失效"，三个解决方式（拆分到另一个 Bean / 注入自身代理 / `AopContext.currentProxy()`）的代码与对比见 `02-07-Spring-AOP-Limitations.md` 的自调用解决方案总表。
 
 ### `final`、`private` 与构造器调用限制
 
@@ -495,12 +446,11 @@ AopUtils.isCglibProxy(bean);
 AopUtils.getTargetClass(bean);
 ```
 
-建议断点：
+建议断点（本文只关注"代理入口"这一段；链路推进 `ReflectiveMethodInvocation#proceed()` 见 02-05，全量断点汇总见 02-07 §十）：
 
 ```text
 JdkDynamicAopProxy#invoke()
 CglibAopProxy.DynamicAdvisedInterceptor#intercept()
-ReflectiveMethodInvocation#proceed()
 ```
 
 ### 一个最小可验证 Demo

@@ -13,8 +13,26 @@ top_img: false
 ---
 # Spring AOP 知识点
 
-> 本文聚焦 Spring AOP 的通用原理、源码链路与面试高频问题，按 `Spring Boot 3.3.9 + Java 17 + Spring Framework 6.2.11` 的学习上下文整理。`。  
+> 本文聚焦 Spring AOP 的通用原理、源码链路与面试高频问题，按 `Spring Boot 3.3.9 + Java 17 + Spring Framework 6.2.11` 的学习上下文整理。  
 > 说明：版本标注用于学习与调试上下文，实际项目的官方配套关系仍应以 BOM 与依赖树为准。
+
+---
+
+## 本系列结构索引
+
+本文是本系列的开篇（总览篇），后续按下面顺序递进：
+
+```text
+02-01 AOP 总览        -> 概念、术语、宏观链路（本文）
+02-02 代理机制        -> 代理对象如何工作、JDK/CGLIB（对比 SSOT）
+02-03 自动代理创建    -> 代理对象如何被 Spring 创建
+02-04 元模型          -> Advisor / Advice / Pointcut 的关系
+02-05 拦截器链        -> proceed() 运行时推进
+02-06 事务与 AOP      -> @Transactional 接入
+02-07 边界与排查      -> 失效场景、排查路径（SSOT）
+```
+
+公共知识（JDK/CGLIB 对比、失效场景、调试断点、切面顺序）都在唯一一篇中完整说明，其余各篇只保留与自身主题直接相关的部分并互相引用。
 
 ---
 
@@ -31,15 +49,15 @@ AOP（Aspect-Oriented Programming，面向切面编程）用于把日志、事�
 
 ### 1.2 核心术语
 
-| 术语 | 含义 |
-|------|------|
-| `JoinPoint` | 程序执行过程中可被切面拦截的位置 |
-| `Pointcut` | 用来筛选哪些 `JoinPoint` 会被拦截 |
-| `Advice` | 在连接点前后执行的增强逻辑 |
-| `Aspect` | `Pointcut + Advice` 的组合 |
-| `Weaving` | 把切面织入目标对象的过程 |
-| `Target` | 原始业务对象 |
-| `Proxy` | 织入增强后的代理对象 |
+| 英文术语 | 中文名 | 含义 |
+|------|------|------|
+| `JoinPoint` | 连接点 | 程序执行过程中可被切面拦截的位置 |
+| `Pointcut` | 切入点（切点） | 用来筛选哪些 `JoinPoint` 会被拦截 |
+| `Advice` | 通知（增强） | 在连接点前后执行的增强逻辑 |
+| `Aspect` | 切面 | `Pointcut + Advice` 的组合 |
+| `Weaving` | 织入 | 把切面织入目标对象的过程 |
+| `Target` | 目标对象 | 原始业务对象 |
+| `Proxy` | 代理对象 | 织入增强后的代理对象 |
 
 ### 1.3 五种常见 Advice
 
@@ -127,170 +145,44 @@ public @interface EnableAspectJAutoProxy {
 - 它会参与普通 Bean 的初始化过程。
 - 它可以在 Bean 初始化完成后，判断当前 Bean 是否需要代理。
 
-### 3.3 在 Bean 初始化后创建代理
+### 3.3 代理创建、类型选择与调用链（宏观链路）
 
-Spring AOP 代理不是在扫描到 `@Aspect` 的那一刻就创建，而是在目标 Bean 初始化后创建。
-
-典型链路：
+Spring AOP 代理不是在扫描到 `@Aspect` 的那一刻就创建，而是在目标 Bean 初始化后创建。整个链路可以压缩成一张宏观图：
 
 ```text
-AbstractAutowireCapableBeanFactory.initializeBean()
-  -> applyBeanPostProcessorsAfterInitialization()
-  -> AnnotationAwareAspectJAutoProxyCreator.postProcessAfterInitialization()
-  -> wrapIfNecessary()
-  -> createProxy()
+Bean 初始化完成
+  -> postProcessAfterInitialization()
+  -> 判断是否有 Advisor 匹配
+  -> 有则创建代理（ProxyFactory）
+  -> 代理对象替换原始 Bean
+      -> 方法调用进入 MethodInterceptor 链
+      -> proceed() 递归推进
+      -> 最终调用目标方法
 ```
 
-其中几个关键动作：
-
-1. 找出当前容器中所有可用的 `Advisor`
-2. 判断哪些 `Advisor` 能匹配当前 Bean
-3. 如果存在匹配项，则使用 `ProxyFactory` 创建代理
-4. 返回代理对象替换原始 Bean
-
-### 3.4 代理类型选择
-
-Spring AOP 会根据目标类型和配置选择代理方式：
-
-- 目标类实现接口时，可用 JDK 动态代理
-- 没有接口，或显式要求类代理时，使用 CGLIB
-
-在 Spring Boot 的默认 AOP 配置下，通常会走类代理路径，即更常见地看到 `$$SpringCGLIB$$`。
-
-### 3.5 方法调用时如何执行切面
-
-代理创建完成后，真正的方法调用会进入拦截器链：
-
-```text
-代理对象.method()
-  -> 获取当前方法对应的 Advisor
-  -> 转换为 MethodInterceptor 链
-  -> ReflectiveMethodInvocation.proceed()
-  -> 按责任链顺序执行各个拦截器
-  -> 最终调用目标方法
-```
-
-可以把 `proceed()` 理解为“递归推进责任链”：
-
-- 还有下一个拦截器，就继续调用下一个
-- 没有下一个拦截器，就真正调用目标方法
+代理类型选择、方法调用细节与 Spring Boot 默认行为见 `02-02-Spring-AOP-Proxy.md`；`wrapIfNecessary()` 等创建时机细节见 `02-03-Spring-AOP-AutoProxyCreator.md`。
 
 ---
 
 ## 四、JDK 动态代理与 CGLIB
 
-| 维度 | JDK 动态代理 | CGLIB |
-|------|--------------|-------|
-| 前提 | 目标类实现接口 | 不要求接口 |
-| 原理 | 生成接口代理类 | 生成目标类子类 |
-| 限制 | 只能代理接口方法 | 不能代理 `final` 类 / `final` 方法 |
-| 常见标识 | `$Proxy...` | `$$SpringCGLIB$$...` |
+Spring AOP 常用两种代理：JDK 动态代理（基于接口）与 CGLIB（基于目标类生成子类）。
 
-常见判断题：
-
-- `private` 方法不能被 Spring AOP 代理
-- `final` 方法不能被 CGLIB 覆盖增强
-- `this.xxx()` 的内部调用不会经过代理
+完整对比表、选择逻辑与 Spring Boot 默认 CGLIB 的行为说明见 `02-02-Spring-AOP-Proxy.md`；两种代理各自的失效边界见 `02-07-Spring-AOP-Limitations.md`。
 
 ---
 
 ## 五、常见失效场景
 
-### 5.1 自调用失效
+本节只给出失效场景索引，不展开细节；原理、解决方式与排查在各篇 SSOT 位置：
 
-这是最常见的 AOP 面试题。
-
-```java
-@Service
-public class UserService {
-
-    public void methodA() {
-        this.methodB();
-    }
-
-    @Transactional
-    public void methodB() {
-    }
-}
-```
-
-`this.methodB()` 调用的是当前对象本身，不是代理对象，因此事务、缓存、日志等 AOP 增强都不会生效。
-
-常见解决方式：
-
-1. 自注入代理对象
-2. `AopContext.currentProxy()`
-3. 拆分成两个 Bean
-
-示例：
-
-```java
-@Service
-public class UserService {
-
-    @Autowired
-    @Lazy
-    private UserService self;
-
-    public void methodA() {
-        self.methodB();
-    }
-
-    @Transactional
-    public void methodB() {
-    }
-}
-```
-
-### 5.2 方法不可代理
-
-以下情况常常导致增强失效：
-
-- 目标方法是 `private`
-- 目标方法是 `final`
-- 目标类本身是 `final`
-- 方法不在代理暴露的调用路径中
-
-### 5.3 非 Spring 容器对象
-
-如果对象是手动 `new` 出来的，而不是从容器获取，就没有代理能力。
-
-```java
-UserService service = new UserService(); // 不会有 AOP
-```
-
-### 5.4 调用时机太早
-
-在这些阶段调用自身方法，通常也不会触发 AOP：
-
-- 构造器
-- `@PostConstruct`
-- Bean 尚未完成代理替换之前的早期阶段
-
-原因很简单：代理对象还没创建出来。
-
-### 5.5 异常被吞掉
-
-尤其是事务场景：
-
-```java
-@Around("...")
-public Object dangerous(ProceedingJoinPoint pjp) {
-    try {
-        return pjp.proceed();
-    } catch (Throwable ex) {
-        log.error("error", ex);
-        return null;
-    }
-}
-```
-
-这会带来两个问题：
-
-- 上层以为方法成功执行了
-- 事务看不到异常，可能不会回滚
-
-正确做法通常是记录后继续抛出。
+| 场景 | 一句话原因 | 详见 |
+|------|-----------|------|
+| 自调用 | `this` 调用不经过代理对象 | 02-02 §六（原理）、02-07 §三（解决） |
+| 非 Spring Bean | 手动 `new` 不经过容器 / BeanPostProcessor | 02-07 §二 |
+| 方法不可代理 | `private` / `final` / `static` 的代理限制 | 02-07 §五、§六 |
+| 调用时机太早 | 构造器 / `@PostConstruct` 时代理尚未创建 | 02-07 §四 |
+| 异常被吞 | 事务拦截器看不到异常，不会回滚 | 02-06 §八 |
 
 ---
 
@@ -371,41 +263,13 @@ public Object around(ProceedingJoinPoint pjp) throws Throwable {
 
 ## 七、调试建议
 
-调试 Spring AOP，建议重点盯住下面几个点：
+调试 Spring AOP 的总体思路：
 
-### 7.1 看代理何时创建
+1. **看代理何时创建**：在 Bean 初始化后断点确认是否进入代理创建流程（注册与创建断点见 02-03）。
+2. **看拦截器链何时执行**：在方法调用时断点确认是否进入拦截器链（代理入口断点见 02-02，链路推进见 02-05）。
+3. **先写最小可调试 Demo**：一个 Service + 一个 Aspect + 一个 `@Around` + 一个能触发自调用问题的方法，最容易看清代理创建和执行链。
 
-可从这些类入手：
-
-- `AnnotationAwareAspectJAutoProxyCreator`
-- `AbstractAutoProxyCreator`
-- `ProxyFactory`
-- `DefaultAopProxyFactory`
-
-重点方法：
-
-- `postProcessAfterInitialization()`
-- `wrapIfNecessary()`
-- `createProxy()`
-
-### 7.2 看拦截器链何时执行
-
-重点方法：
-
-- `ReflectiveMethodInvocation.proceed()`
-- `JdkDynamicAopProxy.invoke()`
-- `CglibAopProxy.DynamicAdvisedInterceptor.intercept()`
-
-### 7.3 先写最小可调试 Demo
-
-建议最小化场景：
-
-1. 一个 Service
-2. 一个 Aspect
-3. 一个 `@Around`
-4. 一个能触发自调用问题的方法
-
-这样最容易看清代理创建和执行链。
+各主题的具体断点与全链路断点总表见 02-07 §十。
 
 ---
 
@@ -423,29 +287,12 @@ public Object around(ProceedingJoinPoint pjp) throws Throwable {
 
 > Spring AOP 是运行时代理，只支持方法级连接点；AspectJ 是字节码织入，能力更强但复杂度更高。
 
-### 8.3 `@Transactional` 为什么会失效
-
-高频原因：
-
-1. 自调用
-2. 非 Spring Bean
-3. 方法不可代理
-4. 异常被吞
-5. 调用时机太早
-
 ### 8.4 `@Around` 和 `@Before/@After` 怎么选
 
 - 只做前置/后置固定逻辑，用 `@Before` / `@After`
 - 需要控制是否执行目标方法、修改入参、改返回值、统一异常处理，用 `@Around`
 
-### 8.5 多个切面怎么控制顺序
-
-通过：
-
-- `@Order`
-- `Ordered`
-
-数字越小，越先进入；退出时顺序相反。
+> 注：`@Transactional` 为什么会失效的完整答案见 02-07；多个切面的顺序控制见 02-07 §八。
 
 ---
 

@@ -352,34 +352,7 @@ Pointcut 匹配类
 
 ### 多个 Advisor 谁先执行
 
-当一个 Bean 同时匹配多个 Advisor 时，Spring 会排序。
-
-常见控制方式：
-
-```java
-@Order(1)
-@Aspect
-@Component
-public class FirstAspect {
-}
-
-@Order(2)
-@Aspect
-@Component
-public class SecondAspect {
-}
-```
-
-执行顺序可以理解为：
-
-```text
-优先级高的环绕在外层
-  -> 调用下一个拦截器
-      -> 调用目标方法
-  -> 返回后再执行外层后置逻辑
-```
-
-所以 `@Around` 场景下，顺序表现类似洋葱模型。
+当一个 Bean 同时匹配多个 Advisor 时，Spring 会排序，`@Around` 场景下表现为洋葱模型。控制方式（`@Order` / `Ordered`）与完整说明见 `02-07-Spring-AOP-Limitations.md` 切面顺序一节。
 
 ---
 
@@ -409,69 +382,19 @@ MethodInterceptor 链负责运行时增强
 
 ### Advisor 如何变成 MethodInterceptor
 
-创建代理时保存的是 Advisor，但方法调用时真正执行的是 `MethodInterceptor`。
-
-运行期会把 Advisor 转换成拦截器链：
-
-```text
-Advisor
-  -> Advice
-      -> MethodInterceptor
-```
-
-例如：
-
-| 注解 | 运行时适配 |
-|------|------------|
-| `@Before` | 前置拦截器 |
-| `@AfterReturning` | 返回后拦截器 |
-| `@AfterThrowing` | 异常拦截器 |
-| `@Around` | 环绕拦截器 |
-
-方法调用时大致是：
-
-```text
-proxy.method()
-  -> 获取当前方法的 MethodInterceptor 链
-  -> ReflectiveMethodInvocation.proceed()
-  -> 按顺序执行拦截器
-  -> 调用 target.method()
-```
+创建代理时保存的是 Advisor，但方法调用时真正执行的是 `MethodInterceptor`。Advice 适配成各类型拦截器的完整说明见 `02-04-Spring-AOP-Advisor-Advice-Pointcut.md` §五。
 
 ### 和事务 AOP 的关系
 
-声明式事务本质上也依赖 Spring AOP 代理。
-
-例如：
-
-```java
-@Transactional
-public void createOrder() {
-}
-```
-
-事务会被封装成 Advisor：
-
-```text
-BeanFactoryTransactionAttributeSourceAdvisor
-  -> TransactionAttributeSourcePointcut
-  -> TransactionInterceptor
-```
-
-所以事务和普通切面的底层主线是一致的：
-
-```text
-Advisor 匹配 Bean
-  -> 创建代理
-  -> 方法调用进入 TransactionInterceptor
-  -> 开启事务 / 提交事务 / 回滚事务
-```
+声明式事务本质上也依赖 Spring AOP 代理：`@Transactional` 会通过事务 Advisor（`BeanFactoryTransactionAttributeSourceAdvisor` 等）进入自动代理流程，与普通切面共用同一套"Advisor 匹配 Bean -> 创建代理 -> 进入 MethodInterceptor 链"的主线。事务接入 AOP 的完整链路见 `02-06-Spring-AOP-And-Transaction.md`。
 
 ---
 
 ## 七、循环依赖、提前代理与缓存
 
 自动代理创建器最容易绕晕人的地方，是它和循环依赖、三级缓存结合在一起。
+
+> 循环依赖三级缓存的完整机制见 `01-03-Spring-IOC-Bean-Creation.md`，本文只讲它与 AOP 提前代理的衔接。
 
 普通场景：
 
@@ -548,7 +471,7 @@ postProcessAfterInitialization() 又创建一次代理
 
 ### 调试断点建议
 
-建议按顺序看：
+建议按顺序看（只关注"注册与创建"这一段；代理入口断点 `JdkDynamicAopProxy#invoke` 等见 02-02）：
 
 ```text
 AopConfigUtils#registerAspectJAnnotationAutoProxyCreatorIfNecessary()
@@ -556,8 +479,6 @@ AnnotationAwareAspectJAutoProxyCreator#findCandidateAdvisors()
 AbstractAutoProxyCreator#postProcessAfterInitialization()
 AbstractAutoProxyCreator#wrapIfNecessary()
 AbstractAutoProxyCreator#createProxy()
-JdkDynamicAopProxy#invoke()
-CglibAopProxy.DynamicAdvisedInterceptor#intercept()
 ```
 
 观察重点：
@@ -668,17 +589,11 @@ public class DemoRunner implements CommandLineRunner {
 
 > Spring 会扫描容器中的 `@Aspect` Bean，把通知方法解析成 Advisor，再由自动代理创建器匹配目标 Bean 并创建代理。
 
-**一个 Bean 是否需要代理由什么决定？**
-
-> 主要看是否存在能应用到该 Bean 的 Advisor，也就是切点是否匹配当前 Bean 的类或方法。
-
 **为什么 Spring 不给所有 Bean 都创建代理？**
 
 > 代理有成本，而且只有命中 Advisor 的 Bean 才需要增强；基础设施 Bean、切面自身、未匹配切点的 Bean 都会被跳过。
 
-**AOP 和事务是什么关系？**
-
-> 声明式事务通过事务 Advisor 和 `TransactionInterceptor` 接入 Spring AOP 自动代理流程，本质也是代理加拦截器链。
+> 注：一个 Bean 是否需要代理的依据（Advisor 存在性）见 02-04 面试快答；AOP 与事务的关系见 02-06。
 
 **循环依赖时 AOP 代理怎么处理？**
 

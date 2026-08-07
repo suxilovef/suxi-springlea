@@ -14,7 +14,8 @@ top_img: false
 # Spring AOP 限制与问题排查
 
 > 本文是 Spring AOP 系列的边界总结篇，重点整理 Spring AOP 做不到什么、哪些场景容易失效、以及遇到 AOP 不生效时应该如何排查。  
-> 主线是：代理模型决定能力边界 -> 常见失效场景 -> 定位路径 -> 解决建议。
+> 主线是：代理模型决定能力边界 -> 常见失效场景 -> 定位路径 -> 解决建议。  
+> 同时，本文是**本系列失效场景与排查路径的单一入口（SSOT）**：自调用解决方案、切面顺序、失效排查总表、全链路调试断点均以本文为准。系列其他各篇只保留与自身主题直接相关的部分，并统一指向本文。
 
 ---
 
@@ -124,6 +125,8 @@ public class UserService {
 | 注入自身代理 | 可用但谨慎 | 需要处理循环依赖，代码可读性一般 |
 | `AopContext.currentProxy()` | 不推荐常规使用 | 强依赖 Spring AOP，需要开启 `exposeProxy` |
 
+> 本表是系列中自调用解决方案的唯一完整说明；`02-02-Spring-AOP-Proxy.md` 与 `02-06-Spring-AOP-And-Transaction.md` 中不再展开这三个方案的代码，统一指向此处。
+
 ---
 
 ## 四、限制三：默认是方法级代理
@@ -225,7 +228,28 @@ CGLIB 通过生成目标类子类实现代理。
 | `final` 类 | 不能被继承，无法生成代理子类 |
 | `final` 方法 | 不能被重写，无法插入拦截逻辑 |
 | `private` 方法 | 子类不可见，也不能被外部代理调用 |
-| `static` 方法 | 属于类，不属于实例代理调用 |
+
+### 两种代理共同的限制：private 与 static
+
+`private` 与 `static` 与代理实现方式无关，JDK 动态代理和 CGLIB **都拦不到**：
+
+- `private` 方法：JDK 只代理接口方法，`private` 不可能出现在接口里；CGLIB 靠子类覆盖，`private` 无法被继承覆盖。
+- `static` 方法：绑定的是类而非实例，两种代理的调用入口都拦截不到。它不属于"CGLIB 特有限制"。
+
+### 注意：JDK 代理对 final 方法未必失效
+
+CGLIB 拦不到 `final` 方法，但 JDK 动态代理**只要该方法声明在接口上，照样能拦截**：
+
+```text
+接口声明了方法（abstract）
+  -> 实现类把该方法实现为 final（合法 Java）
+  -> JDK 代理拦截的是接口方法调用
+  -> 通过反射 invoke 到目标的 final 实现
+```
+
+面试一句话结论：
+
+> `final` 方法在 CGLIB 下必然失效；在 JDK 代理下只要声明在接口上就拦得到。
 
 示例：
 
@@ -283,6 +307,8 @@ public void before() {
 ## 八、限制七：多个切面顺序不符合预期
 
 多个切面同时命中一个方法时，执行顺序由 Advisor 排序决定。
+
+> 本节是本系列切面顺序控制的唯一完整说明；`02-03-Spring-AOP-AutoProxyCreator.md` 中的 `@Order` 内容已收敛至此。
 
 常见控制方式：
 
@@ -354,21 +380,17 @@ System.out.println(AopUtils.isCglibProxy(bean));
 System.out.println(AopUtils.getTargetClass(bean));
 ```
 
-常用断点：
+全链路调试断点总表（本系列 SSOT）：
 
-```text
-AbstractAutoProxyCreator#wrapIfNecessary()
-AbstractAdvisorAutoProxyCreator#findEligibleAdvisors()
-DefaultAdvisorChainFactory#getInterceptorsAndDynamicInterceptionAdvice()
-ReflectiveMethodInvocation#proceed()
-```
+| 阶段 | 断点 | 归属文档 |
+|------|------|----------|
+| 注册 | `AopConfigUtils#registerAspectJAnnotationAutoProxyCreatorIfNecessary` | 02-03 |
+| 匹配与创建 | `AbstractAdvisorAutoProxyCreator#findEligibleAdvisors` / `AbstractAutoProxyCreator#wrapIfNecessary` / `AbstractAutoProxyCreator#createProxy` | 02-03 |
+| 代理入口 | `JdkDynamicAopProxy#invoke` / `CglibAopProxy.DynamicAdvisedInterceptor#intercept` | 02-02 |
+| 链路推进 | `ReflectiveMethodInvocation#proceed` / `DefaultAdvisorChainFactory#getInterceptorsAndDynamicInterceptionAdvice` | 02-05 |
+| 事务 | `TransactionInterceptor#invoke` / `TransactionAttributeSourcePointcut#matches` | 02-06 |
 
-如果是事务问题，再额外看：
-
-```text
-TransactionInterceptor#invoke()
-TransactionAttributeSourcePointcut#matches()
-```
+按主题排查时，各文档只保留与自身直接相关的断点，全量汇总以本表为准。
 
 ---
 
@@ -439,6 +461,16 @@ Spring AOP 适合：
 ---
 
 ## 十三、面试高频快答
+
+**`@Transactional` 为什么会失效？**（本系列 SSOT 答案）
+
+高频原因：
+
+1. 自调用（`this` 调用不经过代理对象）。
+2. 非 Spring Bean（手动 `new` 没有代理能力）。
+3. 方法不可代理（`private`、`final` 方法等）。
+4. 异常被吞掉（事务拦截器看不到异常，不会回滚）。
+5. 调用时机太早（构造器 / `@PostConstruct` 时代理尚未创建）。
 
 **Spring AOP 最大限制是什么？**
 

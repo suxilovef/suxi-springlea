@@ -301,33 +301,11 @@ MethodInterceptor 链
 
 ## 六、Advisor 在自动代理创建中的作用
 
-自动代理创建器判断一个 Bean 是否需要代理时，核心逻辑就是找 Advisor。
-
-主线如下：
+自动代理创建器判断一个 Bean 是否需要代理，核心逻辑就是找 Advisor。这一事实可以概括为：
 
 ```text
-wrapIfNecessary()
-  -> findEligibleAdvisors()
-      -> findCandidateAdvisors()
-      -> findAdvisorsThatCanApply()
-  -> createProxy()
-```
-
-其中：
-
-| 方法 | 作用 |
-|------|------|
-| `findCandidateAdvisors()` | 找到容器中的候选 Advisor |
-| `findAdvisorsThatCanApply()` | 判断哪些 Advisor 能应用到当前 Bean |
-| `createProxy()` | 把可应用 Advisor 放进代理配置 |
-
-也就是说：
-
-```text
-有 Advisor 匹配当前 Bean
-  -> 创建代理
-没有 Advisor 匹配当前 Bean
-  -> 返回原始 Bean
+有 Advisor 匹配当前 Bean -> 创建代理
+没有 Advisor 匹配当前 Bean -> 返回原始 Bean
 ```
 
 代理对象不是因为某个类上有 `@Service` 就创建，真正依据是：
@@ -335,6 +313,8 @@ wrapIfNecessary()
 ```text
 当前 Bean 的方法是否命中了某个 Advisor 的 Pointcut
 ```
+
+`wrapIfNecessary() -> findEligibleAdvisors() -> findCandidateAdvisors() / findAdvisorsThatCanApply() -> createProxy()` 的完整调用链与各方法职责，见 `02-03-Spring-AOP-AutoProxyCreator.md`。
 
 ---
 
