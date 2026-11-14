@@ -10,7 +10,7 @@ Spring 学习仓库：`docs/springlearn/` 下按主题组织学习文档（00 �
 
 ## 文档导航
 - 入口：`docs/springlearn/00-Spring学习路径.md`（全景地图）
-- 章节：01-Spring-IOC（5 篇，含 Ex-01）→ 02-Spring-AOP（7 篇）→ 03-Spring-MVC/Transaction/Data（6 篇）→ 04-SpringBoot（3 篇）
+- 章节：01-Spring-IOC（5 篇，含 Ex-01）→ 02-Spring-AOP（7 篇）→ 03-Spring-MVC/Transaction/Data（6 篇）→ 04-SpringBoot（4 篇）→ 05-SpringBoot工程化（4 篇）
 - 实验记录：`docs/springlearn/experiment-01-call-graph.md`
 - 源码阅读基准：Spring Framework 6.x（对应 Boot 3.3.9）
 

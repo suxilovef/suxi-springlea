@@ -268,11 +268,6 @@ Spring Cloud
 04-01-SpringBoot-启动流程.md
 04-02-SpringBoot-自动配置.md
 04-03-SpringBoot-Starter.md
-```
-
-建议后续新增文档：
-
-```text
 04-04-SpringBoot-配置绑定.md
 ```
 
@@ -311,7 +306,7 @@ Spring Cloud
 
 ## 9. 第 6 阶段：Spring Boot 工程化与生产治理
 
-建议后续新增文档：
+对应当前文档：
 
 ```text
 05-01-SpringBoot-Actuator-监控.md
