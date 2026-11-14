@@ -1298,17 +1298,27 @@ protected Object initializeBean(
     invokeAwareMethods(beanName, bean);
 
     Object wrappedBean = bean;
-    wrappedBean = applyBeanPostProcessorsBeforeInitialization(
-        wrappedBean, beanName);
+    // synthetic Bean 跳过初始化前、后两个 BeanPostProcessor 阶段
+    if (mbd == null || !mbd.isSynthetic()) {
+        wrappedBean = applyBeanPostProcessorsBeforeInitialization(
+            wrappedBean, beanName);
+    }
 
     invokeInitMethods(beanName, wrappedBean, mbd);
 
-    wrappedBean = applyBeanPostProcessorsAfterInitialization(
-        wrappedBean, beanName);
+    if (mbd == null || !mbd.isSynthetic()) {
+        wrappedBean = applyBeanPostProcessorsAfterInitialization(
+            wrappedBean, beanName);
+    }
 
     return wrappedBean;
 }
 ```
+
+注意两点：
+
+- `mbd == null || !mbd.isSynthetic()` 同时控制前后两个 BPP 阶段，synthetic Bean 不会经过它们，而不是无条件调用。
+- 这里省略了 SecurityManager 分支和 `invokeInitMethods()` 外层的 `try/catch`；真实源码中初始化方法抛出的异常会被包装成 `BeanCreationException`。
 
 #### 14.2 Aware 回调分成两组
 
@@ -1331,6 +1341,23 @@ MessageSourceAware
 ApplicationStartupAware
 ApplicationContextAware
 ```
+
+这里的“初始化前阶段”不是某个私有步骤，而是 `applyBeanPostProcessorsBeforeInitialization()` 这条 BeanPostProcessor 扩展链。`ApplicationContextAwareProcessor` 本身就是链上的一个 BPP：
+
+```text
+initializeBean()
+  ├── invokeAwareMethods()                        第一组：写死在创建模板里
+  └── applyBeanPostProcessorsBeforeInitialization()
+      └── ApplicationContextAwareProcessor.postProcessBeforeInitialization()
+          └── invokeAwareInterfaces()             第二组：通过扩展链执行
+```
+
+所以两组的区别不只是接口名单，而是调用方不同，根因是分层：
+
+- 第一组只需要 BeanName、BeanClassLoader、BeanFactory 自身引用，`DefaultListableBeanFactory` 全都能拿到，因此在创建模板里直接写死。
+- 第二组依赖 Environment、ResourceLoader、MessageSource、事件发布器等 ApplicationContext 级概念。`DefaultListableBeanFactory` 不应反过来依赖 ApplicationContext，于是由上下文在 `prepareBeanFactory()` 中注册 `ApplicationContextAwareProcessor`，把自己的能力通过 BPP 扩展链注入 Bean。
+
+Spring Framework `6.1.17` 的入口判断是 `bean instanceof Aware`，再在 `invokeAwareInterfaces()` 中逐个 `instanceof` 判断七个接口，而不是一次性写七个判断的或运算；只实现其他 `Aware` 的 Bean 会进入该方法，但不会命中任何分支。
 
 #### 14.3 @PostConstruct 在哪里执行
 
@@ -1358,6 +1385,30 @@ applyBeanPostProcessorsBeforeInitialization()
 6. BeanPostProcessor.postProcessAfterInitialization()
    └── AbstractAutoProxyCreator 通常在这里返回最终 AOP 代理
 ```
+
+这个顺序不能简单理解为“PriorityOrdered 一定先执行”。`ApplicationContextAwareProcessor` 没有实现任何排序接口，却排在第 2 步；`CommonAnnotationBeanPostProcessor` 是 `PriorityOrdered`，反而在第 3 步。实际次序由三个注册时序共同决定：
+
+1. `ApplicationContextAwareProcessor` 在 `AbstractApplicationContext.prepareBeanFactory()` 中注册，早于 `registerBeanPostProcessors()`。`addBeanPostProcessor()` 是 remove + add 的追加语义，所以先注册的 BPP 位于列表头部。
+2. 排序只作用于 `registerBeanPostProcessors()` 当次收集的那批 BPP：PriorityOrdered 组、Ordered 组、其余组依次追加。它们都排在已存在的 BPP 之后，不会把先注册的 BPP 挤到后面。
+3. `CommonAnnotationBeanPostProcessor` 同时是 `MergedBeanDefinitionPostProcessor`，会在 `registerBeanPostProcessors()` 末尾被重新 add，等同移动到列表尾部；`ApplicationListenerDetector` 也会被显式再注册一次，保证最后执行。
+
+一个最小 `AnnotationConfigApplicationContext` 实测得到的最终列表如下（Spring Boot 应用会注册更多 BPP，但相对关系不变）：
+
+```text
+ApplicationContextAwareProcessor
+ConfigurationClassPostProcessor$ImportAwareBeanPostProcessor
+PostProcessorRegistrationDelegate$BeanPostProcessorChecker
+<自定义无排序 BeanPostProcessor>
+CommonAnnotationBeanPostProcessor
+AutowiredAnnotationBeanPostProcessor
+ApplicationListenerDetector
+```
+
+由此可见，`@PostConstruct` 排在 `ApplicationContextAware` 之后的原因是前者被重注册到了尾部，而后者注册得最早，与二者是否实现 `PriorityOrdered` 无关。
+
+`applyBeanPostProcessorsBeforeInitialization()` 会遍历全部 BPP，但 `BeanPostProcessor.postProcessBeforeInitialization()` 是 default 方法，未覆写的实现直接返回原对象，等于空转。这一阶段真正做事的只有少数几个：`ApplicationContextAwareProcessor`、`InitDestroyAnnotationBeanPostProcessor`（`@PostConstruct` 的父类）、`ImportAwareBeanPostProcessor`，以及 Boot 的 `ConfigurationPropertiesBindingPostProcessor` 等。列表中的 `AutowiredAnnotationBeanPostProcessor` 虽然也在这条调用链上，但它不覆写该方法，`@Autowired` 在 `populateBean()` 的 `postProcessProperties()` 阶段完成。
+
+另外，任一 BPP 返回 `null` 会立即终止循环并返回 `null`，后面的 BPP 不再执行，自定义 BPP 不应返回 `null`。
 
 #### 14.5 自定义初始化方法
 
