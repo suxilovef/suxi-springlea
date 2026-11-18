@@ -352,14 +352,16 @@ Spring Cloud
 
 ## 10. 第 7 阶段：Spring Cloud 微服务基础
 
-建议后续新增文档：
+对应当前文档（第 7 阶段推进中）：
 
 ```text
-06-01-SpringCloud-注册发现.md
-06-02-SpringCloud-配置中心.md
-06-03-SpringCloud-OpenFeign.md
-06-04-SpringCloud-Gateway.md
+06-01-SpringCloud-注册发现.md   （已完成）
+06-02-SpringCloud-配置中心.md   （待写）
+06-03-SpringCloud-OpenFeign.md  （待写）
+06-04-SpringCloud-Gateway.md    （待写）
 ```
+
+当前进度：06-01 已产出，覆盖注册中心模型、Eureka/Nacos 默认值与源码链路、客户端负载均衡、优雅下线、失败模型与排查实验。后续三篇按「配置中心 → 声明式调用 → 网关」推进。
 
 核心目标：
 
